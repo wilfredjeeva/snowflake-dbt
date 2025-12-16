@@ -12,7 +12,7 @@ permissions:
 
 defaults:
   run:
-    working-directory: snowflake-workspace
+    working-directory: datahub_refinery
 
 env:
   DBT_PROJECT_OBJECT_NAME: DATAHUB_DBT_MODELS

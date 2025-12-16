@@ -1,44 +1,48 @@
-name: datahub_refinery
+name: snowflake_workspace
 version: 1.0.0
 config-version: 2
-profile: datahub_refinery
-quoting: { identifier: true }
+profile: workspace_profile
 
-model-paths:
-  - models
-analysis-paths:
-  - analyses
-test-paths:
-  - tests
-seed-paths:
-  - seeds
-macro-paths:
-  - macros
-snapshot-paths:
-  - snapshots
-  
+model-paths: ["models"]
+seed-paths: ["seeds"]
+test-paths: ["tests"]
+snapshot-paths: ["snapshots"]
+macro-paths: ["macros"]
+
+# Environment-aware database names (client standard: database-per-layer)
+vars:
+  landing_db: "{{ (target.name ~ '_LANDING_ADF') | upper }}"
+  bronze_db: "{{ (target.name ~ '_BRONZE_ADF') | upper }}"
+  silver_db: "{{ (target.name ~ '_SILVER') | upper }}"
+  gold_db: "{{ (target.name ~ '_GOLD') | upper }}"
+  platinum_db: "{{ (target.name ~ '_PLATINUM') | upper }}"
+
+# Seeds are optional. In the real hub, ADF loads Landing.
+# Keep seeds only for demo/local testing.
+seeds:
+  snowflake_workspace:
+    +database: "{{ var('landing_db') }}"
+    +schema: "DEMO"
+
 models:
-  datahub_refinery:
-    +persist_docs: { relation: true, columns: true }
-    
+  snowflake_workspace:
     bronze_adf:
-      +database: "{{ (target.name ~ '_BRONZE_ADF') | upper }}"
-      airbnb:
-        +materialized: table
-        +schema: AIRBNB
-
-    gold:
-      +database: "{{ (target.name ~ '_GOLD_ADF') | upper }}"
-      +materialized: incremental
-      airbnb:
-        +schema: AIRBNB
-
-snapshots:
-  datahub_refinery:
-    +persist_docs: { relation: true, columns: true }
+      +database: "{{ var('bronze_db') }}"
+      +materialized: table
+      +tags: ["bronze_adf"]
 
     silver:
-      +database: "{{ (target.name ~ '_SILVER_ADF') | upper }}"
-      
-      airbnb:
-        +schema: AIRBNB
+      +database: "{{ var('silver_db') }}"
+      +materialized: incremental
+      +on_schema_change: sync_all_columns
+      +tags: ["silver"]
+
+    gold:
+      +database: "{{ var('gold_db') }}"
+      +materialized: table
+      +tags: ["gold"]
+
+    platinum:
+      +database: "{{ var('platinum_db') }}"
+      +materialized: view
+      +tags: ["platinum"]

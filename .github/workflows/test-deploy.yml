@@ -50,7 +50,7 @@ jobs:
           EOF
 
       - name: Install dbt dependencies (packages)
-        run: dbt deps --profiles-dir datahub_refinery
+        run: dbt deps --profiles-dir datahub_refinery --target test
 
       - name: Deploy dbt project object to DBTCENTRAL.TEST_* schema
         run: |

@@ -9,10 +9,6 @@ on:
 permissions:
   contents: read
 
-defaults:
-  run:
-    working-directory: datahub_refinery
-
 env:
   DBT_PROJECT_OBJECT_NAME: DATAHUB_DBT_MODELS
 
@@ -54,12 +50,12 @@ jobs:
           EOF
 
       - name: Install dbt dependencies (packages)
-        run: dbt deps
+        run: dbt deps --profiles-dir datahub_refinery
 
       - name: Deploy dbt project object to DBTCENTRAL.TEST_* schema
         run: |
-          snow dbt deploy "${{ env.DBT_PROJECT_OBJECT_NAME }}" --source . --profiles-dir . --force -c ci
+          snow dbt deploy "${{ env.DBT_PROJECT_OBJECT_NAME }}" --source . --profiles-dir datahub_refinery --force -c ci
 
       - name: Execute dbt build in Snowflake (TEST) (includes tests)
         run: |
-          snow dbt execute "${{ env.DBT_PROJECT_OBJECT_NAME }}" build             --target test             --select "path:models+" -c ci
+          snow dbt execute "${{ env.DBT_PROJECT_OBJECT_NAME }}" build             --target test             --select "path:models+" --profiles-dir datahub_refinery -c ci

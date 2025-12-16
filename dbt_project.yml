@@ -1,7 +1,7 @@
 name: snowflake_workspace
 version: 1.0.0
 config-version: 2
-profile: workspace_profile
+profile: datahub_refinery
 
 model-paths: ["models"]
 seed-paths: ["seeds"]

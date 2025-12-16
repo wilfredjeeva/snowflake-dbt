@@ -51,7 +51,7 @@ jobs:
           database = "${ secrets.SNOWFLAKE_PROJECT_DB }"
           schema   = "${ secrets.SNOWFLAKE_PROJECT_SCHEMA }"
           authenticator = "SNOWFLAKE_JWT"
-          private_key_path = "$HOME/sf_key.p8"
+          private_key_path = "/home/runner/sf_key.p8"
           EOF
           chmod 0600 ~/.snowflake/config.toml
 

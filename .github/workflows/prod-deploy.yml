@@ -49,6 +49,7 @@ jobs:
           authenticator = "SNOWFLAKE_JWT"
           private_key_path = "$HOME/sf_key.p8"
           EOF
+          chmod 0600 ~/.snowflake/config.toml
 
       - name: Install dbt dependencies (packages)
         run: dbt deps --profiles-dir datahub_refinery --target prod

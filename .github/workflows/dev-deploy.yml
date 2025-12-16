@@ -1,0 +1,76 @@
+name: Deploy DEV (feature/*)
+
+on:
+  push:
+    branches:
+      - "feature/**"
+  # Optional: also validate on PRs into test (runs in DEV target)
+  pull_request:
+    branches:
+      - "test"
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: snowflake-workspace
+
+env:
+  DBT_PROJECT_OBJECT_NAME: DATAHUB_DBT_MODELS
+
+jobs:
+  dev_deploy_run:
+    runs-on: ubuntu-latest
+    environment: dev
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Snowflake CLI + dbt
+        run: |
+          python -m pip install --upgrade pip
+          pip install --upgrade snowflake-cli dbt-core dbt-snowflake
+
+      - name: Write Snowflake private key (from GitHub Environment secret)
+        run: |
+          echo "${ secrets.SNOWFLAKE_PRIVATE_KEY_B64 }" | base64 -d > $HOME/sf_key.p8
+          chmod 600 $HOME/sf_key.p8
+
+      - name: Configure Snowflake CLI connection (ci)
+        run: |
+          mkdir -p ~/.snowflake
+          cat > ~/.snowflake/config.toml <<'EOF'
+          default_connection_name = "ci"
+          [connections.ci]
+          account = "${ secrets.SNOWFLAKE_ACCOUNT }"
+          user = "${ secrets.SNOWFLAKE_USER }"
+          role = "${ secrets.SNOWFLAKE_ROLE }"
+          warehouse = "${ secrets.SNOWFLAKE_WAREHOUSE }"
+          database = "${ secrets.SNOWFLAKE_PROJECT_DB }"
+          schema   = "${ secrets.SNOWFLAKE_PROJECT_SCHEMA }"
+          authenticator = "SNOWFLAKE_JWT"
+          private_key_path = "$HOME/sf_key.p8"
+          EOF
+
+      - name: Install dbt dependencies (packages)
+        run: dbt deps
+- name: Deploy dbt project object to DBTCENTRAL.DEV_* schema
+  run: |
+    snow dbt deploy "${{ env.DBT_PROJECT_OBJECT_NAME }}" --source . --profiles-dir . --force -c ci
+
+- name: Execute dbt build in Snowflake (DEV) (includes tests)
+  run: |
+    snow dbt execute "${{ env.DBT_PROJECT_OBJECT_NAME }}" build             --target dev             --select "path:models+" -c ci
+
+- name: Upload dbt artifacts (optional)
+  uses: actions/upload-artifact@v4
+  with:
+    name: dbt_artifacts_dev
+    path: |
+      snowflake-workspace/target/manifest.json
+      snowflake-workspace/target/run_results.json
+    if-no-files-found: ignore

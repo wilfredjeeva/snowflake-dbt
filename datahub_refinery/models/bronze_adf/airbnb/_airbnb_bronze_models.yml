@@ -1,0 +1,14 @@
+version: 2
+
+models:
+  - name: airbnb_bronze_reviews
+    description: "Bronze layer AirBnB reviews data, casted and standardized."
+    config:
+      alias: AirBnBReviews
+
+    columns:
+      - name: listing_id
+        description: "Unique identifier for the property listing."
+        quote: true
+        data_tests:
+          - not_null

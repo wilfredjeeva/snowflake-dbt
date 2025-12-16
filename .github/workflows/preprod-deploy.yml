@@ -1,0 +1,94 @@
+name: Deploy PREPROD (after TEST success)
+
+on:
+  workflow_run:
+    workflows: ["Deploy TEST (test branch)"]
+    types: [completed]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+defaults:
+  run:
+    working-directory: snowflake-workspace
+
+env:
+  DBT_PROJECT_OBJECT_NAME: DATAHUB_DBT_MODELS
+
+jobs:
+  preprod_deploy_run:
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'test' }}
+    runs-on: ubuntu-latest
+    environment: preprod
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Checkout the exact commit that was deployed to TEST
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Snowflake CLI + dbt
+        run: |
+          python -m pip install --upgrade pip
+          pip install --upgrade snowflake-cli dbt-core dbt-snowflake
+
+      - name: Write Snowflake private key (from GitHub Environment secret)
+        run: |
+          echo "${ secrets.SNOWFLAKE_PRIVATE_KEY_B64 }" | base64 -d > $HOME/sf_key.p8
+          chmod 600 $HOME/sf_key.p8
+
+      - name: Configure Snowflake CLI connection (ci)
+        run: |
+          mkdir -p ~/.snowflake
+          cat > ~/.snowflake/config.toml <<'EOF'
+          default_connection_name = "ci"
+          [connections.ci]
+          account = "${ secrets.SNOWFLAKE_ACCOUNT }"
+          user = "${ secrets.SNOWFLAKE_USER }"
+          role = "${ secrets.SNOWFLAKE_ROLE }"
+          warehouse = "${ secrets.SNOWFLAKE_WAREHOUSE }"
+          database = "${ secrets.SNOWFLAKE_PROJECT_DB }"
+          schema   = "${ secrets.SNOWFLAKE_PROJECT_SCHEMA }"
+          authenticator = "SNOWFLAKE_JWT"
+          private_key_path = "$HOME/sf_key.p8"
+          EOF
+
+      - name: Install dbt dependencies (packages)
+        run: dbt deps
+      - name: Deploy dbt project object to DBTCENTRAL.PREPROD_* schema
+        run: |
+          snow dbt deploy "${{ env.DBT_PROJECT_OBJECT_NAME }}" --source . --profiles-dir . --force -c ci
+
+      - name: Execute dbt build in Snowflake (PREPROD) (includes tests)
+        run: |
+          snow dbt execute "${{ env.DBT_PROJECT_OBJECT_NAME }}" build             --target preprod             --select "path:models+" -c ci
+
+      - name: Auto-create PR to promote TEST → pre-prod
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            const title = `Promote TEST → pre-prod (SHA ${context.payload.workflow_run.head_sha.substring(0,7)})`;
+            const body  = `Auto PR created after successful PREPROD deployment.
+
+Source: test
+Target: pre-prod
+Commit: ${context.payload.workflow_run.head_sha}`;
+            try {
+              const pr = await github.pulls.create({
+                owner,
+                repo,
+                head: "test",
+                base: "pre-prod",
+                title,
+                body
+              });
+              core.info(`Created PR #${pr.data.number}`);
+            } catch (e) {
+              core.warning(`Could not create PR (it may already exist): ${e.message}`);
+            }

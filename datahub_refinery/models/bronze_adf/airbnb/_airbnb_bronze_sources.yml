@@ -1,0 +1,20 @@
+version: 2
+
+sources:
+
+  - name: LANDING_AIRBNB
+    database: "{{ (target.name ~ '_LANDING_ADF') | upper }}"
+    schema: AIRBNB
+    description: "Raw Airbnb data ingested from external sources."
+    quoting: { identifier: true }
+    
+    tables:
+    
+      - name: AirBnBListings
+        description: "All Airbnb listing metadata."
+            
+      - name: AirBnBReviews
+        description: "User-submitted reviews for listings."
+
+      - name: AirBnBDrivers
+        description: "All Airbnb drivers metadata."

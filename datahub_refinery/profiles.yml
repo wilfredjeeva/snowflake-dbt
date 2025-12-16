@@ -1,0 +1,9 @@
+datahub_refinery:
+  target: dev
+  outputs:
+    dev:
+      type: snowflake
+      role: ACCOUNTADMIN
+      warehouse: COMPUTE_WH
+      database: DEV_BRONZE_ADF
+      schema: PUBLIC

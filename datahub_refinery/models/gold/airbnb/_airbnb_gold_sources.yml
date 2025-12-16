@@ -1,0 +1,12 @@
+version: 2
+
+sources:
+
+  - name: GOLD_AIRBNB
+    database: "{{ (target.name ~ '_GOLD_ADF') | upper }}"
+    schema: AIRBNB
+    
+    tables:
+    
+      - name: DIM_GEOGRAPHY            
+      - name: DIM_GEOGRAPHY_GEOSPATIAL

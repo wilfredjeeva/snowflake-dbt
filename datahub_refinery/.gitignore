@@ -1,0 +1,5 @@
+# Ignore dbt artifacts
+target/
+dbt_modules/
+logs/
+dbt_internal_packages/

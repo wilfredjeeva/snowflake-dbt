@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# dbt
+target/
+dbt_packages/
+logs/
+
+# Keys / secrets
+*.p8
+*.pem
+*.pub
+*.b64
+keys/
+
+# OS
+.DS_Store
+Thumbs.db

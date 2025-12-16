@@ -76,9 +76,9 @@ jobs:
             const title = `Promote TEST → pre-prod (SHA ${context.payload.workflow_run.head_sha.substring(0,7)})`;
             const body  = `Auto PR created after successful PREPROD deployment.
 
-Source: test
-Target: pre-prod
-Commit: ${context.payload.workflow_run.head_sha}`;
+            Source: test
+            Target: pre-prod
+            Commit: ${context.payload.workflow_run.head_sha}`;
             try {
               const pr = await github.pulls.create({
                 owner,

@@ -66,11 +66,10 @@ jobs:
           script: |
             const {owner, repo} = context.repo;
             const title = `Sync main after PROD deploy (${context.sha.substring(0,7)})`;
-            const body  = `Auto PR created after successful PROD deploy (deploy-only).
-
-Source: pre-prod
-Target: main
-Commit: ${context.sha}`;
+            const body  = `Auto PR created after successful PROD deploy (deploy-only).\n\n` +
+              `Source: pre-prod\n` +
+              `Target: main\n` +
+              `Commit: ${context.sha}`;
             try {
               const pr = await github.pulls.create({
                 owner,

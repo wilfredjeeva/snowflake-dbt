@@ -1,0 +1,18 @@
+# dbt packages
+# Add any dbt packages your project depends on here
+# Common packages include:
+# - dbt_utils: Utility macros for dbt projects
+# - dbt_expectations: Data quality testing framework
+# - dbt_audit_helper: Compare data between environments
+
+# Example:
+# packages:
+#   - package: dbt-labs/dbt_utils
+#     version: 1.1.1
+#
+#   - package: calogica/dbt_expectations
+#     version: 0.10.1
+
+# If you don't need any packages, you can delete this file
+# and remove the 'dbt deps' step from your GitHub workflows
+packages: []

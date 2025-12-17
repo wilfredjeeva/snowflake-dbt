@@ -58,7 +58,7 @@ jobs:
 
       - name: Deploy dbt project object to DBTCENTRAL.DEV_* schema
         run: |
-          snow dbt deploy "${{ env.DBT_PROJECT_OBJECT_NAME }}" --source . --profiles-dir datahub_refinery --force -c ci
+          snow dbt deploy "${{ env.DBT_PROJECT_OBJECT_NAME }}" --source . --profiles-dir datahub_refinery --target dev --force -c ci
 
       - name: Execute dbt build in Snowflake (DEV) (includes tests)
         run: |

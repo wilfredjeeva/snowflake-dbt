@@ -27,22 +27,26 @@ seeds:
 models:
   snowflake_workspace:
     bronze_adf:
-      +database: "{{ var('bronze_db') }}"
+      +database: "{{ (target.name ~ '_BRONZE_ADF') | upper }}"
       +materialized: table
       +tags: ["bronze_adf"]
 
     silver:
-      +database: "{{ var('silver_db') }}"
+      +database: "{{ (target.name ~ '_SILVER') | upper }}"
       +materialized: incremental
       +on_schema_change: sync_all_columns
       +tags: ["silver"]
 
     gold:
-      +database: "{{ var('gold_db') }}"
+      +database: "{{ (target.name ~ '_GOLD') | upper }}"
       +materialized: table
       +tags: ["gold"]
 
     platinum:
-      +database: "{{ var('platinum_db') }}"
+      +database: "{{ (target.name ~ '_PLATINUM') | upper }}"
       +materialized: view
       +tags: ["platinum"]
+
+snapshots:
+  snowflake_workspace:
+    +database: "{{ (target.name ~ '_SILVER') | upper }}"

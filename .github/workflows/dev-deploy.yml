@@ -54,11 +54,13 @@ jobs:
           chmod 0600 ~/.snowflake/config.toml
 
       - name: Install dbt dependencies (packages)
-        run: dbt deps --profiles-dir datahub_refinery --target dev
+        run: |
+          cd datahub_refinery
+          dbt deps --target dev
 
       - name: Deploy dbt project object to DBTCENTRAL.DEV_* schema
         run: |
-          snow dbt deploy "${{ env.DBT_PROJECT_OBJECT_NAME }}" --source . --profiles-dir datahub_refinery --default-target dev --force
+          snow dbt deploy "${{ env.DBT_PROJECT_OBJECT_NAME }}" --source datahub_refinery --profiles-dir datahub_refinery --default-target dev --force
 
       - name: Execute dbt build in Snowflake (DEV) (includes tests)
         run: |

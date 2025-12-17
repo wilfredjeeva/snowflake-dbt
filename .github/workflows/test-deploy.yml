@@ -59,4 +59,4 @@ jobs:
 
       - name: Execute dbt build in Snowflake (TEST) (includes tests)
         run: |
-          snow dbt execute "${{ env.DBT_PROJECT_OBJECT_NAME }}" build             --target test             --select "path:models+" --profiles-dir datahub_refinery -c ci
+          snow dbt execute "${{ env.DBT_PROJECT_OBJECT_NAME }}" build --target test --select "path:models+" -c ci

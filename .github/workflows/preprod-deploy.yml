@@ -63,7 +63,7 @@ jobs:
 
       - name: Execute dbt build in Snowflake (PREPROD) (includes tests)
         run: |
-          snow dbt execute "${{ env.DBT_PROJECT_OBJECT_NAME }}" build             --target preprod             --select "path:models+" --profiles-dir datahub_refinery -c ci
+          snow dbt execute "${{ env.DBT_PROJECT_OBJECT_NAME }}" build --target preprod --select "path:models+" -c ci
 
       - name: Auto-create PR to promote TEST → pre-prod
         uses: actions/github-script@v7

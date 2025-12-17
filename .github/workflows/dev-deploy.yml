@@ -62,7 +62,7 @@ jobs:
 
       - name: Execute dbt build in Snowflake (DEV) (includes tests)
         run: |
-          snow dbt execute "${{ env.DBT_PROJECT_OBJECT_NAME }}" build             --target dev             --select "path:models+" --profiles-dir datahub_refinery -c ci
+          snow dbt execute "${{ env.DBT_PROJECT_OBJECT_NAME }}" build --target dev --select "path:models+" -c ci
 
       - name: Upload dbt artifacts (optional)
         uses: actions/upload-artifact@v4

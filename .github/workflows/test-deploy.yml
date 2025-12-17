@@ -55,8 +55,8 @@ jobs:
 
       - name: Deploy dbt project object to DBTCENTRAL.TEST_* schema
         run: |
-          snow dbt -c ci deploy "${{ env.DBT_PROJECT_OBJECT_NAME }}" --source . --profiles-dir datahub_refinery --default-target test --force
+          snow dbt deploy "${{ env.DBT_PROJECT_OBJECT_NAME }}" --source . --profiles-dir datahub_refinery --default-target test --force
 
       - name: Execute dbt build in Snowflake (TEST) (includes tests)
         run: |
-          snow dbt -c ci execute "${{ env.DBT_PROJECT_OBJECT_NAME }}" build --target test --select "path:models+"
+          snow dbt execute "${{ env.DBT_PROJECT_OBJECT_NAME }}" build --target test --select "path:models+"

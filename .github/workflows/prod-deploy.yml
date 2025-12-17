@@ -55,7 +55,7 @@ jobs:
         run: dbt deps --profiles-dir datahub_refinery --target prod
       - name: Deploy dbt project object to DBTCENTRAL.PROD_* schema (NO RUN in prod)
         run: |
-          snow dbt deploy "${{ env.DBT_PROJECT_OBJECT_NAME }}" --source . --profiles-dir datahub_refinery --target prod --force -c ci
+          snow dbt deploy "${{ env.DBT_PROJECT_OBJECT_NAME }}" --source . --profiles-dir datahub_refinery --default-target prod --force -c ci
 
       - name: Auto-create PR to sync pre-prod → main
         uses: actions/github-script@v7

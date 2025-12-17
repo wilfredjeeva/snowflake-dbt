@@ -59,7 +59,7 @@ jobs:
         run: dbt deps --profiles-dir datahub_refinery --target preprod
       - name: Deploy dbt project object to DBTCENTRAL.PREPROD_* schema
         run: |
-          snow dbt deploy "${{ env.DBT_PROJECT_OBJECT_NAME }}" --source . --profiles-dir datahub_refinery --target preprod --force -c ci
+          snow dbt deploy "${{ env.DBT_PROJECT_OBJECT_NAME }}" --source . --profiles-dir datahub_refinery --default-target preprod --force -c ci
 
       - name: Execute dbt build in Snowflake (PREPROD) (includes tests)
         run: |

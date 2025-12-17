@@ -33,7 +33,7 @@ jobs:
 
       - name: Write Snowflake private key (from GitHub Environment secret)
         run: |
-          echo "${ secrets.SNOWFLAKE_PRIVATE_KEY_B64 }" | base64 -d > $HOME/sf_key.p8
+          echo "${{ secrets.SNOWFLAKE_PRIVATE_KEY_B64 }}" | base64 -d > $HOME/sf_key.p8
           chmod 600 $HOME/sf_key.p8
 
       - name: Configure Snowflake CLI connection (ci)
@@ -42,12 +42,12 @@ jobs:
           cat > ~/.snowflake/config.toml <<'EOF'
           default_connection_name = "ci"
           [connections.ci]
-          account = "${ secrets.SNOWFLAKE_ACCOUNT }"
-          user = "${ secrets.SNOWFLAKE_USER }"
-          role = "${ secrets.SNOWFLAKE_ROLE }"
-          warehouse = "${ secrets.SNOWFLAKE_WAREHOUSE }"
-          database = "${ secrets.SNOWFLAKE_PROJECT_DB }"
-          schema   = "${ secrets.SNOWFLAKE_PROJECT_SCHEMA }"
+          account = "${{ secrets.SNOWFLAKE_ACCOUNT }}"
+          user = "${{ secrets.SNOWFLAKE_USER }}"
+          role = "${{ secrets.SNOWFLAKE_ROLE }}"
+          warehouse = "${{ secrets.SNOWFLAKE_WAREHOUSE }}"
+          database = "${{ secrets.SNOWFLAKE_PROJECT_DB }}"
+          schema   = "${{ secrets.SNOWFLAKE_PROJECT_SCHEMA }}"
           authenticator = "SNOWFLAKE_JWT"
           private_key_path = "/home/runner/sf_key.p8"
           EOF

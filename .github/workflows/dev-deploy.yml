@@ -58,11 +58,11 @@ jobs:
 
       - name: Deploy dbt project object to DBTCENTRAL.DEV_* schema
         run: |
-          snow dbt deploy "${{ env.DBT_PROJECT_OBJECT_NAME }}" --source . --profiles-dir datahub_refinery --default-target dev --force -c ci
+          snow dbt -c ci deploy "${{ env.DBT_PROJECT_OBJECT_NAME }}" --source . --profiles-dir datahub_refinery --default-target dev --force
 
       - name: Execute dbt build in Snowflake (DEV) (includes tests)
         run: |
-          snow dbt execute "${{ env.DBT_PROJECT_OBJECT_NAME }}" build --target dev --select "path:models+" -c ci
+          snow dbt -c ci execute "${{ env.DBT_PROJECT_OBJECT_NAME }}" build --target dev --select "path:models+"
 
       - name: Upload dbt artifacts (optional)
         uses: actions/upload-artifact@v4

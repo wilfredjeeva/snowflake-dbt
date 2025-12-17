@@ -21,7 +21,7 @@ vars:
 # Keep seeds only for demo/local testing.
 seeds:
   snowflake_workspace:
-    +database: "{{ var('landing_db') }}"
+    +database: "{{ (target.name ~ '_LANDING_ADF') | upper }}"
     +schema: "DEMO"
 
 models:

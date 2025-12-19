@@ -1,8 +1,9 @@
 {{ config(
-    alias = 'AirBnBListings',
-    post_hook = [
-        "{{ apply_tag('name', 'DEV_LANDING_ADF.AIRBNB.PII_TAG_LISTINGs', 'sensitive') }}",
-    ]
+    alias = 'AirBnBListings'
+    -- Temporarily commented out until PII tags are created in Snowflake
+    -- post_hook = [
+    --     "{{ apply_tag('name', 'DEV_LANDING_ADF.AIRBNB.PII_TAG_LISTINGs', 'sensitive') }}",
+    -- ]
 ) }}
 
 SELECT

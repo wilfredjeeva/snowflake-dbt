@@ -1,10 +1,10 @@
 {{ config(
     alias = 'AirBnBListings'
-    -- Temporarily commented out until PII tags are created in Snowflake
-    -- post_hook = [
-    --     "{{ apply_tag('name', 'DEV_LANDING_ADF.AIRBNB.PII_TAG_LISTINGs', 'sensitive') }}",
-    -- ]
 ) }}
+
+{# TODO: Re-enable PII tag application once tag is created in Snowflake:
+   post_hook = ["{{ apply_tag('name', 'DEV_LANDING_ADF.AIRBNB.PII_TAG_LISTINGs', 'sensitive') }}"]
+#}
 
 SELECT
     CURRENT_TIMESTAMP AS SYSLOADDATE,

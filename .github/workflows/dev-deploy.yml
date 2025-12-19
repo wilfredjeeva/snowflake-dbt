@@ -12,10 +12,6 @@ on:
 permissions:
   contents: read
 
-defaults:
-  run:
-    working-directory: datahub_refinery
-
 env:
   DBT_PROJECT_OBJECT_NAME: DATAHUB_DBT_MODELS
 
@@ -37,7 +33,7 @@ jobs:
 
       - name: Write Snowflake private key (from GitHub Environment secret)
         run: |
-          echo "${ secrets.SNOWFLAKE_PRIVATE_KEY_B64 }" | base64 -d > $HOME/sf_key.p8
+          printf '%s' "${{ secrets.SNOWFLAKE_PRIVATE_KEY_B64 }}" | base64 -d > $HOME/sf_key.p8
           chmod 600 $HOME/sf_key.p8
 
       - name: Configure Snowflake CLI connection (ci)
@@ -46,32 +42,35 @@ jobs:
           cat > ~/.snowflake/config.toml <<'EOF'
           default_connection_name = "ci"
           [connections.ci]
-          account = "${ secrets.SNOWFLAKE_ACCOUNT }"
-          user = "${ secrets.SNOWFLAKE_USER }"
-          role = "${ secrets.SNOWFLAKE_ROLE }"
-          warehouse = "${ secrets.SNOWFLAKE_WAREHOUSE }"
-          database = "${ secrets.SNOWFLAKE_PROJECT_DB }"
-          schema   = "${ secrets.SNOWFLAKE_PROJECT_SCHEMA }"
+          account = "${{ secrets.SNOWFLAKE_ACCOUNT }}"
+          user = "${{ secrets.SNOWFLAKE_USER }}"
+          role = "${{ secrets.SNOWFLAKE_ROLE }}"
+          warehouse = "${{ secrets.SNOWFLAKE_WAREHOUSE }}"
+          database = "${{ secrets.SNOWFLAKE_PROJECT_DB }}"
+          schema   = "${{ secrets.SNOWFLAKE_PROJECT_SCHEMA }}"
           authenticator = "SNOWFLAKE_JWT"
-          private_key_path = "$HOME/sf_key.p8"
+          private_key_path = "/home/runner/sf_key.p8"
           EOF
+          chmod 0600 ~/.snowflake/config.toml
 
       - name: Install dbt dependencies (packages)
-        run: dbt deps
+        run: |
+          cd datahub_refinery
+          dbt deps --target dev
 
       - name: Deploy dbt project object to DBTCENTRAL.DEV_* schema
         run: |
-          snow dbt deploy "${{ env.DBT_PROJECT_OBJECT_NAME }}" --source . --profiles-dir . --force -c ci
+          snow dbt deploy "${{ env.DBT_PROJECT_OBJECT_NAME }}" --source datahub_refinery --profiles-dir datahub_refinery --default-target dev --force
 
       - name: Execute dbt build in Snowflake (DEV) (includes tests)
         run: |
-          snow dbt execute "${{ env.DBT_PROJECT_OBJECT_NAME }}" build             --target dev             --select "path:models+" -c ci
+          snow dbt execute "${{ env.DBT_PROJECT_OBJECT_NAME }}" build --target dev --select "path:models+"
 
       - name: Upload dbt artifacts (optional)
         uses: actions/upload-artifact@v4
         with:
           name: dbt_artifacts_dev
           path: |
-            snowflake-workspace/target/manifest.json
-            snowflake-workspace/target/run_results.json
+            target/manifest.json
+            target/run_results.json
           if-no-files-found: ignore

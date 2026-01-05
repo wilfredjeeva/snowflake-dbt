@@ -44,6 +44,11 @@ SELECT
     '{{ invocation_id }}' AS SYSRUNID,
     'DBT' AS SYSPROCESSINGTOOL,
     '{{ project_name }}' AS SYSDATAPROCESSORNAME,
+    CASE 
+        WHEN ABNB.PRICE > 200 THEN 'High Value'
+        WHEN ABNB.PRICE > 100 THEN 'Medium Value'
+        ELSE 'Standard'
+    END AS VALUE_CATEGORY,
     ABNB.SOURCESYSTEM,
     DD.SK AS LISTING_SK,
     ABNB.ID as LISTING_ID,

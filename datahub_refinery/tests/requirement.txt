@@ -1,0 +1,6 @@
+pytest
+snowflake-connector-python
+pytest-html
+dotenv
+pandas
+snowflake-connector-python[pandas]

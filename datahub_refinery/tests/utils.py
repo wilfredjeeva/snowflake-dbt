@@ -1,0 +1,54 @@
+import logging
+from pandas.testing import assert_frame_equal
+
+logger = logging.getLogger(__name__)
+if not logger.handlers:
+    # Basic configuration only if no handlers are present
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+
+
+def get_row_count(cursor, table_full_name) -> int:
+    query = f"SELECT COUNT(*) FROM {table_full_name}"
+    cursor.execute(query)
+    row = cursor.fetchone()
+    print(row)
+
+    if row[0] == 0:
+        logger.warning("⚠️ Table %s has no records (COUNT(*) = 0).", table_full_name)
+
+    if row is None or len(row) < 1:
+        raise ValueError(f"Unexpected COUNT(*). Result for table {table_full_name}: {row}")
+    return int(row[0])
+
+
+def compare_row_counts(cursor, source_table, target_table):
+    lcount = get_row_count(cursor, source_table)
+    bcount = get_row_count(cursor, target_table)
+    diff = abs(lcount - bcount)
+
+    assert lcount == bcount, (f"❌ Row count difference {diff} : " f"Landing Count={lcount}, Bronze Count={bcount}")
+    print(f"✅ Success: Row counts match! landing table count={lcount}, bronze table count={bcount}")
+
+
+def compare_data(cursor, source_query, landing_table, target_query, bronze_table):
+    cursor.execute(source_query, (landing_table,))
+    landing_df = cursor.fetch_pandas_all()
+    print("Landing Data:", landing_df)
+
+    cursor.execute(target_query, (bronze_table,))
+    bronze_df = cursor.fetch_pandas_all()
+    print("Bronze Data:", bronze_df)
+    try:
+        assert_frame_equal(
+            bronze_df, landing_df,
+            check_dtype=False, check_index_type=False, check_column_type=False, check_like=True)
+        print(f"✅ Success: Data matched!")
+    except AssertionError as e:
+        # Compose a richer message
+        custom = (
+            (msg + "\n") if msg else ""
+                                     + "❌ Failure: DataFrames differ.\n"
+                                     + "Details (from pandas):\n"
+                                     + str(e)
+        )
+        raise AssertionError(custom)

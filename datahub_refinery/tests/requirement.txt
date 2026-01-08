@@ -1,6 +1,7 @@
 pytest
 snowflake-connector-python
 pytest-html
-dotenv
+python-dotenv
 pandas
 snowflake-connector-python[pandas]
+cryptography

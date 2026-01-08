@@ -6,16 +6,14 @@ from dotenv import load_dotenv
 
 print("=== DEBUG PATHS ===")
 print("__file__:", __file__)
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-SRC_PATH = os.path.join(PROJECT_ROOT, 'src')
+# Fix path - point to current tests directory (not src/)
+PROJECT_ROOT = os.path.abspath(os.path.dirname(__file__))
 print("PROJECT_ROOT:", PROJECT_ROOT)
-print("SRC_PATH:", SRC_PATH)
-print("Exists src?:", os.path.isdir(SRC_PATH))
-print("Exists sf_client.py?:", os.path.isfile(os.path.join(SRC_PATH, "sf_client.py")))
+print("Exists sf_client.py?:", os.path.isfile(os.path.join(PROJECT_ROOT, "sf_client.py")))
 print("sys.path head:", sys.path[:5])
 
-if SRC_PATH not in sys.path:
-    sys.path.insert(0, SRC_PATH)
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 print("sys.path head (after):", sys.path[:5])
 print("Try import sf_client…")
@@ -55,21 +53,61 @@ def pytest_addoption(parser):
 
 @pytest.fixture(scope="session")
 def sf_conn(pytestconfig):
-    conn = snowflake.connector.connect(
-        account=pytestconfig.getoption('--sf-account'),
-        # host=pytestconfig.getoption('--sf-host'),
-        user=pytestconfig.getoption('--sf-user'),
-        password=pytestconfig.getoption('--sf-password'),
-        role=pytestconfig.getoption('--sf-role'),
-        warehouse=pytestconfig.getoption('--sf-warehouse'),
-        database=pytestconfig.getoption('--sf-database'),
-        schema=pytestconfig.getoption('--sf-schema')
-    )
+    """Snowflake connection with JWT authentication support"""
+    auth = pytestconfig.getoption('--sf-authenticator')
+    
+    conn_params = {
+        'account': pytestconfig.getoption('--sf-account'),
+        'user': pytestconfig.getoption('--sf-user'),
+        'role': pytestconfig.getoption('--sf-role'),
+        'warehouse': pytestconfig.getoption('--sf-warehouse'),
+        'database': pytestconfig.getoption('--sf-database'),
+        'schema': pytestconfig.getoption('--sf-schema')
+    }
+    
+    # Use JWT authentication if configured
+    if auth == 'SNOWFLAKE_JWT':
+        private_key_path = pytestconfig.getoption('--sf-private-key-path')
+        if private_key_path:
+            # Expand ~ to home directory
+            private_key_path = os.path.expanduser(private_key_path)
+            
+            with open(private_key_path, 'rb') as key_file:
+                private_key_data = key_file.read()
+            
+            from cryptography.hazmat.backends import default_backend
+            from cryptography.hazmat.primitives import serialization
+            
+            p_key = serialization.load_pem_private_key(
+                private_key_data,
+                password=None,
+                backend=default_backend()
+            )
+            
+            pkb = p_key.private_bytes(
+                encoding=serialization.Encoding.DER,
+                format=serialization.PrivateFormat.PKCS8,
+                encryption_algorithm=serialization.NoEncryption()
+            )
+            
+            conn_params['private_key'] = pkb
+            conn_params['authenticator'] = 'SNOWFLAKE_JWT'
+            log.info('Using JWT authentication with private key')
+        else:
+            raise ValueError("JWT auth selected but no private key path provided")
+    else:
+        # Fall back to password authentication if needed
+        password = pytestconfig.getoption('--sf-password', default=None)
+        if password:
+            conn_params['password'] = password
+    
+    conn = snowflake.connector.connect(**conn_params)
     cur = conn.cursor()
-    log.info('Opening Snowflake connection...')
+    log.info('✅ Snowflake connection opened')
     yield cur
     log.info('Closing Snowflake connection.')
     cur.close()
+    conn.close()
 
 @pytest.fixture(scope='session')
 def sf(pytestconfig):

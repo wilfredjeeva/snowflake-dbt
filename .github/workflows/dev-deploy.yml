@@ -66,6 +66,29 @@ jobs:
         run: |
           snow dbt execute "${{ env.DBT_PROJECT_OBJECT_NAME }}" build --target dev --select "path:models+"
 
+      - name: Run pytest tests
+        working-directory: datahub_refinery/tests
+        env:
+          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+          SNOWFLAKE_AUTHENTICATOR: SNOWFLAKE_JWT
+          SNOWFLAKE_PRIVATE_KEY_PATH: /home/runner/sf_key.p8
+          SNOWFLAKE_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
+          SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+          SNOWFLAKE_DATABASE: DEV_BRONZE_ADF
+          SNOWFLAKE_SCHEMA: AIRBNB
+        run: |
+          pip install -r requirement.txt
+          pytest -v --html=report.html --self-contained-html
+
+      - name: Upload pytest report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest_report_dev
+          path: datahub_refinery/tests/report.html
+          if-no-files-found: warn
+
       - name: Upload dbt artifacts (optional)
         uses: actions/upload-artifact@v4
         with:

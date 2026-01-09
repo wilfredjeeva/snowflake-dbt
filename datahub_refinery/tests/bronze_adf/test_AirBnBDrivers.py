@@ -3,12 +3,15 @@ from utils import *
 
 
 def test_landing_bronze_count(sf_conn):
-    compare_row_counts(sf_conn, f"{landing_db}.{airBnB_schema}.{airBnB_table}",
-                       f"{bronze_db}.{airBnB_schema}.{airBnB_table}")
+    # Use quoted identifier for case-sensitive landing table
+    landing_table = f'{landing_db}.{airBnB_schema}."AirBnBDrivers"'
+    bronze_table = f"{bronze_db}.{airBnB_schema}.{airBnB_table}"
+    compare_row_counts(sf_conn, landing_table, bronze_table)
 
 
 def test_landing_bronze_dataValidation(sf_conn):
-    landing_table = f"{landing_db}.{airBnB_schema}.{airBnB_table}"
+    # Use quoted identifier for case-sensitive landing table
+    landing_table = f'{landing_db}.{airBnB_schema}."AirBnBDrivers"'
     sql = f"""
             SELECT
                 PAYLOAD:SOURCESYSTEM::STRING AS SOURCESYSTEM,

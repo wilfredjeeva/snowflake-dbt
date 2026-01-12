@@ -1,0 +1,7 @@
+pytest
+snowflake-connector-python
+pytest-html
+python-dotenv
+pandas
+snowflake-connector-python[pandas]
+cryptography

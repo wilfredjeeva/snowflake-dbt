@@ -11,4 +11,5 @@ bronze_db = f"{env_prefix}_BRONZE_ADF"
 
 # Schema and Table names (same across all environments)
 airBnB_schema = "AIRBNB"
-airBnB_table = "AIRBNBDRIVERS"
+airBnB_drivers_table = "AirBnBDrivers"
+airBnB_listing_table="AIRBNBLISTINGS"

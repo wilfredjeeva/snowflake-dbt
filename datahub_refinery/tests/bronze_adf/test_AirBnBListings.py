@@ -5,8 +5,9 @@ from Data.ExpectedSchema.bronze_adf_schema.data_AirBnBListings import (table_nam
 
 @pytest.mark.regression
 def test_landing_bronze_count(sf_conn):
-    compare_row_counts(sf_conn, f"{landing_db}.{airBnB_schema}.{airBnB_listing_table}",
-                       f"{bronze_db}.{airBnB_schema}.{airBnB_listing_table}")
+    landing_table = f'{landing_db}.{airBnB_schema}.{airBnB_listing_table}'
+    bronze_table = f"{bronze_db}.{airBnB_schema}.{airBnB_listing_table}"
+    compare_row_counts(sf_conn, landing_table, bronze_table)
 
 @pytest.mark.regression
 def test_landing_bronze_metadataValidation(sf_conn):

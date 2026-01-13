@@ -1,4 +1,5 @@
 import logging
+from Data.variables import *
 from pandas.testing import assert_frame_equal
 
 logger = logging.getLogger(__name__)
@@ -8,6 +9,10 @@ if not logger.handlers:
 
 
 def get_row_count(cursor, table_full_name) -> int:
+    query = f"SELECT table_catalog,table_schema,table_name FROM {landing_db}.INFORMATION_SCHEMA.COLUMNS where lower(table_name) like 'airbnb%'"
+    cursor.execute(query)
+    row = cursor.fetch_pandas_all()
+    print(row)
     query = f"SELECT COUNT(*) FROM {table_full_name}"
     cursor.execute(query)
     row = cursor.fetchone()
@@ -52,3 +57,13 @@ def compare_data(cursor, source_query, landing_table, target_query, bronze_table
                                      + str(e)
         )
         raise AssertionError(custom)
+
+def check_metadata(cursor,schema_table_name,table_name,expected_column_datatype):
+    query = f"SELECT column_name,data_type from {schema_table_name} where table_name='{table_name}' order by ordinal_position;"
+    cursor.execute(query)
+    actual_schema_df = cursor.fetch_pandas_all()
+    actual_dict = dict(zip(actual_schema_df["COLUMN_NAME"], actual_schema_df["DATA_TYPE"]))
+    print("Actual Schema:", actual_dict)
+    print(expected_column_datatype)
+    assert    actual_dict == expected_column_datatype, (f"❌ Metadata is not matching as expected ")
+    print(f"✅ Success: MetaData matched!")

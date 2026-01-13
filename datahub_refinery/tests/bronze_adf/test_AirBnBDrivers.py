@@ -25,7 +25,7 @@ def test_landing_bronze_dataValidation(sf_conn):
                 PAYLOAD:name:forename::STRING AS "forename",
                 PAYLOAD:name:surname::STRING AS "surname",
                 PAYLOAD:nationality::STRING AS "nationality",
-                PAYLOAD:number::INT AS "number",
+                TRY_TO_NUMBER(PAYLOAD:"number"::STRING) AS "number",
                 PAYLOAD:url::STRING AS "url"
             FROM IDENTIFIER(%s)
             """

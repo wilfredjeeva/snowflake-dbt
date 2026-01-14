@@ -74,25 +74,3 @@ LEFT JOIN {{ source('GOLD_AIRBNB', 'DIM_GEOGRAPHY') }} AS G
     ON ABNB.LATITUDE = G.LATITUDE AND ABNB.LONGITUDE = G.LONGITUDE
 LEFT JOIN {{ source('GOLD_AIRBNB', 'DIM_GEOGRAPHY_GEOSPATIAL') }} AS GS
     ON ABNB.LATITUDE = GS.LATITUDE AND ABNB.LONGITUDE = GS.LONGITUDE
-
-sources:
-  -name:gold_airbnb
-database:DEV_GOLD
-schema:AIRBNB
-tables:
-      -name:FACT_AIRBNBLISTINGS
-description:"Fact table for AirBnB listings"
-columns:
-          -name:LISTING_ID
-description:"Primary key"
-tests:
-              -unique
-              -not_null
-          -name:PRICE
-description:"Listing price per night"
-tests:
-              -not_null
-# This test will FAIL if any price > 500
-              -accepted_values:
-values: [0,50,100,150,200,250,300,350,400,450,500]
-quote:false

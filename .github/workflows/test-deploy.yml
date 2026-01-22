@@ -56,10 +56,16 @@ jobs:
           dbt deps --target test
 
       - name: Deploy dbt project object to DBTCENTRAL.TEST_* schema
+        env:
+          SNOWFLAKE_TEST_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
+          SNOWFLAKE_TEST_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
         run: |
           snow dbt deploy "${{ env.DBT_PROJECT_OBJECT_NAME }}" --source datahub_refinery --profiles-dir datahub_refinery --default-target test --force
 
       - name: Execute dbt build in Snowflake (TEST) (includes tests)
+        env:
+          SNOWFLAKE_TEST_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
+          SNOWFLAKE_TEST_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
         run: |
           snow dbt execute "${{ env.DBT_PROJECT_OBJECT_NAME }}" build --target test --select "path:models+"
 

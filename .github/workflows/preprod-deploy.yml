@@ -56,10 +56,16 @@ jobs:
           cd datahub_refinery
           dbt deps --target preprod
       - name: Deploy dbt project object to DBTCENTRAL.PREPROD_* schema
+        env:
+          SNOWFLAKE_PREPROD_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
+          SNOWFLAKE_PREPROD_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
         run: |
           snow dbt deploy "${{ env.DBT_PROJECT_OBJECT_NAME }}" --source datahub_refinery --profiles-dir datahub_refinery --default-target preprod --force
 
       - name: Execute dbt build in Snowflake (PREPROD) (includes tests)
+        env:
+          SNOWFLAKE_PREPROD_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
+          SNOWFLAKE_PREPROD_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
         run: |
           snow dbt execute "${{ env.DBT_PROJECT_OBJECT_NAME }}" build --target preprod --select "path:models+"
 

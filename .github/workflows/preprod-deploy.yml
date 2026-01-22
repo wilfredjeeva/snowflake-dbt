@@ -31,7 +31,7 @@ jobs:
 
       - name: Write Snowflake private key (from GitHub Environment secret)
         run: |
-          printf '%s' "${{ secrets.SNOWFLAKE_PRIVATE_KEY_B64 }}" | base64 -d > $HOME/sf_key.p8
+          printf '%s' "${{ secrets.SNOWFLAKE_PRIVATE_KEY_B64 }}" | tr -d '\n' | base64 -d > $HOME/sf_key.p8
           chmod 600 $HOME/sf_key.p8
 
       - name: Configure Snowflake CLI connection (ci)
@@ -56,10 +56,16 @@ jobs:
           cd datahub_refinery
           dbt deps --target preprod
       - name: Deploy dbt project object to DBTCENTRAL.PREPROD_* schema
+        env:
+          SNOWFLAKE_PREPROD_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
+          SNOWFLAKE_PREPROD_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
         run: |
           snow dbt deploy "${{ env.DBT_PROJECT_OBJECT_NAME }}" --source datahub_refinery --profiles-dir datahub_refinery --default-target preprod --force
 
       - name: Execute dbt build in Snowflake (PREPROD) (includes tests)
+        env:
+          SNOWFLAKE_PREPROD_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
+          SNOWFLAKE_PREPROD_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
         run: |
           snow dbt execute "${{ env.DBT_PROJECT_OBJECT_NAME }}" build --target preprod --select "path:models+"
 

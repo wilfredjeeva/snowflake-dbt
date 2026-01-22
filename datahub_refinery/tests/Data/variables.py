@@ -8,8 +8,9 @@ env_prefix = database.split('_')[0]  # Extract "DEV", "TEST", "PREPROD", or "PRO
 # Dynamic database names
 landing_db = f"{env_prefix}_LANDING_ADF"
 bronze_db = f"{env_prefix}_BRONZE_ADF"
-
+silver_db=f"{env_prefix}_SILVER_ADF"
 # Schema and Table names (same across all environments)
 airBnB_schema = "AIRBNB"
 airBnB_drivers_table = "AirBnBDrivers"
 airBnB_listing_table="AIRBNBLISTINGS"
+airbnb_silver_table="AIRBNBDRIVERS"

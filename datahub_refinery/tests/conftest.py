@@ -38,24 +38,24 @@ def pytest_addoption(parser):
     parser.addoption('--sf-account',   action='store', default=os.getenv('SNOWFLAKE_ACCOUNT'))
     # parser.addoption('--sf-host',      action='store', default=os.getenv('SNOWFLAKE_HOST'))
     parser.addoption('--sf-user',      action='store', default=os.getenv('SNOWFLAKE_USER'))
-    # parser.addoption('--sf-password',  action='store', default=os.getenv('SNOWFLAKE_PASSWORD'))
+    parser.addoption('--sf-password',  action='store', default=os.getenv('SNOWFLAKE_PASSWORD'))
     parser.addoption('--sf-role',      action='store', default=os.getenv('SNOWFLAKE_ROLE'))
     parser.addoption('--sf-warehouse', action='store', default=os.getenv('SNOWFLAKE_WAREHOUSE'))
     parser.addoption('--sf-database',  action='store', default=os.getenv('SNOWFLAKE_DATABASE'))
     parser.addoption('--sf-schema',    action='store', default=os.getenv('SNOWFLAKE_SCHEMA'))
     parser.addoption('--disable-ocsp', action='store_true', default=False)
     # JWT / key-pair auth options
-    parser.addoption('--sf-authenticator', action='store',
-                     default=os.getenv('SNOWFLAKE_AUTHENTICATOR', 'SNOWFLAKE_JWT'))
-    parser.addoption('--sf-private-key-path', action='store',
-                     default=os.getenv('SNOWFLAKE_PRIVATE_KEY_PATH'))
+    # parser.addoption('--sf-authenticator', action='store',
+    #                  default=os.getenv('SNOWFLAKE_AUTHENTICATOR', 'SNOWFLAKE_JWT'))
+    # parser.addoption('--sf-private-key-path', action='store',
+    #                  default=os.getenv('SNOWFLAKE_PRIVATE_KEY_PATH'))
 
 
 @pytest.fixture(scope="session")
 def sf_conn(pytestconfig):
     """Snowflake connection with JWT authentication support"""
-    auth = pytestconfig.getoption('--sf-authenticator')
-    
+    # auth = pytestconfig.getoption('--sf-authenticator')
+    auth=''
     conn_params = {
         'account': pytestconfig.getoption('--sf-account'),
         'user': pytestconfig.getoption('--sf-user'),

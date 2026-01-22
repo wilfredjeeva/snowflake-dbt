@@ -1,6 +1,6 @@
 import logging
 from Data.variables import *
-from pandas.testing import assert_frame_equal
+from bronze_adf.support import *
 
 logger = logging.getLogger(__name__)
 if not logger.handlers:
@@ -9,10 +9,6 @@ if not logger.handlers:
 
 
 def get_row_count(cursor, table_full_name) -> int:
-    query = f"SELECT table_catalog,table_schema,table_name FROM {landing_db}.INFORMATION_SCHEMA.COLUMNS where lower(table_name) like 'airbnb%'"
-    cursor.execute(query)
-    row = cursor.fetch_pandas_all()
-    print(row)
     query = f"SELECT COUNT(*) FROM {table_full_name}"
     cursor.execute(query)
     row = cursor.fetchone()
@@ -38,25 +34,10 @@ def compare_row_counts(cursor, source_table, target_table):
 def compare_data(cursor, source_query, landing_table, target_query, bronze_table):
     cursor.execute(source_query, (landing_table,))
     landing_df = cursor.fetch_pandas_all()
-    print("Landing Data:", landing_df)
-
     cursor.execute(target_query, (bronze_table,))
     bronze_df = cursor.fetch_pandas_all()
-    print("Bronze Data:", bronze_df)
-    try:
-        assert_frame_equal(
-            bronze_df, landing_df,
-            check_dtype=False, check_index_type=False, check_column_type=False, check_like=True)
-        print(f"✅ Success: Data matched!")
-    except AssertionError as e:
-        # Compose a richer message
-        custom = (
-            (msg + "\n") if msg else ""
-                                     + "❌ Failure: DataFrames differ.\n"
-                                     + "Details (from pandas):\n"
-                                     + str(e)
-        )
-        raise AssertionError(custom)
+    res = save_positional_row_diffs_to_excel(bronze_df, landing_df, "/tmp/diff_oo_NEW.xlsx")
+    print(res)
 
 def check_metadata(cursor,schema_table_name,table_name,expected_column_datatype):
     query = f"SELECT column_name,data_type from {schema_table_name} where table_name='{table_name}' order by ordinal_position;"

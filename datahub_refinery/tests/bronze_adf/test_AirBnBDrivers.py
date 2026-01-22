@@ -1,17 +1,23 @@
+import pytest
 from Data.variables import *
 from utils import *
 from Data.ExpectedSchema.bronze_adf_schema.data_AirBnBDrivers import (table_name, expected_column_datatype)
 
+@pytest.mark.smoke
+@pytest.mark.regression
 def test_landing_bronze_count(sf_conn):
     # Use quoted identifier for case-sensitive landing table
     landing_table = f'{landing_db}.{airBnB_schema}.{airBnB_drivers_table}'
     bronze_table = f"{bronze_db}.{airBnB_schema}.{airBnB_drivers_table}"
     compare_row_counts(sf_conn, landing_table, bronze_table)
 
-
+@pytest.mark.smoke
+@pytest.mark.regression
 def test_landing_bronze_metadataValidation(sf_conn):
     check_metadata(sf_conn,f"{bronze_db}.INFORMATION_SCHEMA.COLUMNS",table_name,expected_column_datatype)
 
+@pytest.mark.smoke
+@pytest.mark.dataValidation
 def test_landing_bronze_dataValidation(sf_conn):
     # Use quoted identifier for case-sensitive landing table
     landing_table = f'{landing_db}.{airBnB_schema}.{airBnB_drivers_table}'

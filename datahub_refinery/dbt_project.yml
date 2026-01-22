@@ -1,0 +1,52 @@
+name: snowflake_workspace
+version: 1.0.0
+config-version: 2
+profile: datahub_refinery
+
+model-paths: ["models"]
+seed-paths: ["seeds"]
+test-paths: ["tests"]
+snapshot-paths: ["snapshots"]
+macro-paths: ["macros"]
+
+# Environment-aware database names (client standard: database-per-layer)
+vars:
+  landing_db: "{{ (target.name ~ '_LANDING_ADF') | upper }}"
+  bronze_db: "{{ (target.name ~ '_BRONZE_ADF') | upper }}"
+  silver_db: "{{ (target.name ~ '_SILVER') | upper }}"
+  gold_db: "{{ (target.name ~ '_GOLD') | upper }}"
+  platinum_db: "{{ (target.name ~ '_PLATINUM') | upper }}"
+
+# Seeds are optional. In the real hub, ADF loads Landing.
+# Keep seeds only for demo/local testing.
+seeds:
+  snowflake_workspace:
+    +database: "{{ (target.name ~ '_LANDING_ADF') | upper }}"
+    +schema: "DEMO"
+
+models:
+  snowflake_workspace:
+    bronze_adf:
+      +database: "{{ (target.name ~ '_BRONZE_ADF') | upper }}"
+      +materialized: table
+      +tags: ["bronze_adf"]
+
+    silver:
+      +database: "{{ (target.name ~ '_SILVER') | upper }}"
+      +materialized: incremental
+      +on_schema_change: sync_all_columns
+      +tags: ["silver"]
+
+    gold:
+      +database: "{{ (target.name ~ '_GOLD') | upper }}"
+      +materialized: table
+      +tags: ["gold"]
+
+    platinum:
+      +database: "{{ (target.name ~ '_PLATINUM') | upper }}"
+      +materialized: view
+      +tags: ["platinum"]
+
+snapshots:
+  snowflake_workspace:
+    +database: "{{ (target.name ~ '_SILVER') | upper }}"

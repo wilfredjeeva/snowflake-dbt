@@ -1,17 +1,26 @@
+import pytest
 from Data.variables import *
 from utils import *
+from Data.ExpectedSchema.bronze_adf_schema.data_AirBnBDrivers import (table_name, expected_column_datatype)
 
-
+@pytest.mark.smoke
+@pytest.mark.regression
 def test_landing_bronze_count(sf_conn):
     # Use quoted identifier for case-sensitive landing table
-    landing_table = f'{landing_db}.{airBnB_schema}."AirBnBDrivers"'
-    bronze_table = f"{bronze_db}.{airBnB_schema}.{airBnB_table}"
+    landing_table = f'{landing_db}.{airBnB_schema}.{airBnB_drivers_table}'
+    bronze_table = f"{bronze_db}.{airBnB_schema}.{airBnB_drivers_table}"
     compare_row_counts(sf_conn, landing_table, bronze_table)
 
+@pytest.mark.smoke
+@pytest.mark.regression
+def test_landing_bronze_metadataValidation(sf_conn):
+    check_metadata(sf_conn,f"{bronze_db}.INFORMATION_SCHEMA.COLUMNS",table_name,expected_column_datatype)
 
+@pytest.mark.smoke
+@pytest.mark.dataValidation
 def test_landing_bronze_dataValidation(sf_conn):
     # Use quoted identifier for case-sensitive landing table
-    landing_table = f'{landing_db}.{airBnB_schema}."AirBnBDrivers"'
+    landing_table = f'{landing_db}.{airBnB_schema}.{airBnB_drivers_table}'
     sql = f"""
             SELECT
                 PAYLOAD:SOURCESYSTEM::STRING AS SOURCESYSTEM,
@@ -22,12 +31,12 @@ def test_landing_bronze_dataValidation(sf_conn):
                 PAYLOAD:name:forename::STRING AS "forename",
                 PAYLOAD:name:surname::STRING AS "surname",
                 PAYLOAD:nationality::STRING AS "nationality",
-                PAYLOAD:number::INT AS "number",
+                TRY_TO_NUMBER(PAYLOAD:"number"::STRING) AS "number",
                 PAYLOAD:url::STRING AS "url"
             FROM IDENTIFIER(%s)
             """
 
-    bronze_table = f"{bronze_db}.{airBnB_schema}.{airBnB_table}"
+    bronze_table = f"{bronze_db}.{airBnB_schema}.{airBnB_drivers_table}"
     bsql = f"""select SOURCESYSTEM,"code","dob","driverId","driverRef","forename","surname","nationality","number","url" from IDENTIFIER(%s)"""
 
     compare_data(sf_conn, sql, landing_table, bsql, bronze_table)

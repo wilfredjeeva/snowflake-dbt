@@ -20,8 +20,8 @@ datahub_refinery:
       type: snowflake
       account: "{{ env_var('SNOWFLAKE_ACCOUNT', 'YOUR_ACCOUNT_ID') }}"
       user: "{{ env_var('SNOWFLAKE_USER', 'YOUR_USERNAME') }}"
-      role: "{{ env_var('SNOWFLAKE_TEST_ROLE', 'DBT_TEST_ROLE') }}"
-      warehouse: "{{ env_var('SNOWFLAKE_TEST_WAREHOUSE', 'DBT_TEST_WH') }}"
+      role: DBT_TEST_ROLE
+      warehouse: DBT_TEST_WH
       database: TEST_BRONZE_ADF
       schema: PUBLIC
       authenticator: SNOWFLAKE_JWT

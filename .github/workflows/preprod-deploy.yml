@@ -31,7 +31,7 @@ jobs:
 
       - name: Write Snowflake private key (from GitHub Environment secret)
         run: |
-          printf '%s' "${{ secrets.SNOWFLAKE_PRIVATE_KEY_B64 }}" | base64 -d > $HOME/sf_key.p8
+          printf '%s' "${{ secrets.SNOWFLAKE_PRIVATE_KEY_B64 }}" | tr -d '\n' | base64 -d > $HOME/sf_key.p8
           chmod 600 $HOME/sf_key.p8
 
       - name: Configure Snowflake CLI connection (ci)

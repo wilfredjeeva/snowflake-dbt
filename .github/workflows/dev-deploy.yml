@@ -8,6 +8,7 @@ on:
   pull_request:
     branches:
       - "test"
+  workflow_dispatch: # Enables manual workflow runs from GitHub UI
 
 permissions:
   contents: read

@@ -36,8 +36,12 @@ def compare_data(cursor, source_query, landing_table, target_query, bronze_table
     landing_df = cursor.fetch_pandas_all()
     cursor.execute(target_query, (bronze_table,))
     bronze_df = cursor.fetch_pandas_all()
-    res = save_positional_row_diffs_to_excel(bronze_df, landing_df, "/tmp/diff_oo_NEW.xlsx")
+    res = save_positional_row_diffs_to_excel(bronze_df, landing_df, "diff_airBnBdriver.xlsx")
     print(res)
+    assert res["diff_row_count"] == 0, (
+        f"Data mismatch found. diff_row_count={res['diff_row_count']}, "
+        f"diff_positions={res['diff_positions']}, excel={res['excel_path']}"
+    )
 
 def check_metadata(cursor,schema_table_name,table_name,expected_column_datatype):
     query = f"SELECT column_name,data_type from {schema_table_name} where table_name='{table_name}' order by ordinal_position;"

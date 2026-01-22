@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+from pathlib import Path
 
 def save_positional_row_diffs_to_excel(
     bronze_df: pd.DataFrame,
@@ -11,6 +12,20 @@ def save_positional_row_diffs_to_excel(
     bronze_sheet: str | None = "bronze_details",
     landing_sheet: str | None = "landing_details",
 ):
+    # -----------------------------
+    # 0) Resolve output path
+    # -----------------------------
+    out_path = Path(out_path)
+
+    # If caller passes only a filename or relative path, write into ./output/
+    if not out_path.is_absolute():
+        output_dir = Path.cwd() / "output"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        out_path = output_dir / out_path
+    else:
+        # If absolute path was provided, ensure its parent exists
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+
     # -----------------------------
     # 1) Normalize columns & length
     # -----------------------------
@@ -96,11 +111,9 @@ def save_positional_row_diffs_to_excel(
     # -----------------------------
     # 7) Write to Excel
     # -----------------------------
-    with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
-        # Write metrics at top
+    with pd.ExcelWriter(str(out_path), engine="openpyxl") as writer:
         metrics.to_excel(writer, sheet_name=summary_sheet, index=False, startrow=0)
 
-        # Leave a blank row, then write row-level summary
         row_summary.to_excel(
             writer,
             sheet_name=summary_sheet,
@@ -108,7 +121,6 @@ def save_positional_row_diffs_to_excel(
             startrow=len(metrics) + 2
         )
 
-        # Details sheets
         details.to_excel(writer, sheet_name=details_sheet, index=False)
 
         if bronze_sheet:
@@ -122,5 +134,5 @@ def save_positional_row_diffs_to_excel(
         "landing_count": landing_count,
         "diff_row_count": int(len(diff_positions)),
         "diff_positions": diff_positions.tolist(),
-        "excel_path": out_path
+        "excel_path": str(out_path)
     }

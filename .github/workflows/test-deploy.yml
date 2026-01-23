@@ -100,3 +100,60 @@ jobs:
             target/manifest.json
             target/run_results.json
           if-no-files-found: ignore
+
+  preprod_deploy_run:
+    needs: test_deploy_run
+    runs-on: ubuntu-latest
+    environment: preprod
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Snowflake CLI + dbt
+        run: |
+          python -m pip install --upgrade pip
+          pip install --upgrade snowflake-cli dbt-core dbt-snowflake
+
+      - name: Write Snowflake private key (from GitHub Environment secret)
+        run: |
+          printf '%s' "${{ secrets.SNOWFLAKE_PRIVATE_KEY_B64 }}" | tr -d '\n' | base64 -d > $HOME/sf_key.p8
+          chmod 600 $HOME/sf_key.p8
+
+      - name: Configure Snowflake CLI connection (ci)
+        run: |
+          mkdir -p ~/.snowflake
+          cat > ~/.snowflake/config.toml <<'EOF'
+          default_connection_name = "ci"
+          [connections.ci]
+          account = "${{ secrets.SNOWFLAKE_ACCOUNT }}"
+          user = "${{ secrets.SNOWFLAKE_USER }}"
+          role = "${{ secrets.SNOWFLAKE_ROLE }}"
+          warehouse = "${{ secrets.SNOWFLAKE_WAREHOUSE }}"
+          database = "${{ secrets.SNOWFLAKE_PROJECT_DB }}"
+          schema   = "${{ secrets.SNOWFLAKE_PROJECT_SCHEMA }}"
+          authenticator = "SNOWFLAKE_JWT"
+          private_key_path = "/home/runner/sf_key.p8"
+          EOF
+          chmod 0600 ~/.snowflake/config.toml
+
+      - name: Install dbt dependencies (packages)
+        run: |
+          cd datahub_refinery
+          dbt deps --target preprod
+
+      - name: Deploy dbt project object to DBTCENTRAL.PREPROD_* schema
+        env:
+          SNOWFLAKE_PREPROD_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
+          SNOWFLAKE_PREPROD_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+        run: |
+          snow dbt deploy "${{ env.DBT_PROJECT_OBJECT_NAME }}" --source datahub_refinery --profiles-dir datahub_refinery --default-target preprod --force
+
+      - name: Execute dbt build in Snowflake (PREPROD) (includes tests)
+        env:
+          SNOWFLAKE_PREPROD_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
+          SNOWFLAKE_PREPROD_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+        run: |
+          snow dbt execute "${{ env.DBT_PROJECT_OBJECT_NAME }}" build --target preprod --select "path:models+"

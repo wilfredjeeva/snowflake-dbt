@@ -31,8 +31,8 @@ datahub_refinery:
       type: snowflake
       account: "{{ env_var('SNOWFLAKE_ACCOUNT', 'YOUR_ACCOUNT_ID') }}"
       user: "{{ env_var('SNOWFLAKE_USER', 'YOUR_USERNAME') }}"
-      role: "{{ env_var('SNOWFLAKE_PREPROD_ROLE', 'DBT_PREPROD_ROLE') }}"
-      warehouse: "{{ env_var('SNOWFLAKE_PREPROD_WAREHOUSE', 'DBT_PREPROD_WH') }}"
+      role: DBT_PREPROD_ROLE
+      warehouse: DBT_PREPROD_WH
       database: PREPROD_BRONZE_ADF
       schema: PUBLIC
       authenticator: SNOWFLAKE_JWT

@@ -1,7 +1,10 @@
 name: Deploy PREPROD (after TEST success)
 
 on:
-  push:
+  workflow_run:
+    workflows: ["Deploy TEST (test branch)"]
+    types:
+      - completed
     branches:
       - "test"
   workflow_dispatch:
@@ -31,7 +34,7 @@ jobs:
 
       - name: Write Snowflake private key (from GitHub Environment secret)
         run: |
-          printf '%s' "${{ secrets.SNOWFLAKE_PRIVATE_KEY_B64 }}" | base64 -d > $HOME/sf_key.p8
+          printf '%s' "${{ secrets.SNOWFLAKE_PRIVATE_KEY_B64 }}" | tr -d '\n' | base64 -d > $HOME/sf_key.p8
           chmod 600 $HOME/sf_key.p8
 
       - name: Configure Snowflake CLI connection (ci)
@@ -56,34 +59,15 @@ jobs:
           cd datahub_refinery
           dbt deps --target preprod
       - name: Deploy dbt project object to DBTCENTRAL.PREPROD_* schema
+        env:
+          SNOWFLAKE_PREPROD_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
+          SNOWFLAKE_PREPROD_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
         run: |
           snow dbt deploy "${{ env.DBT_PROJECT_OBJECT_NAME }}" --source datahub_refinery --profiles-dir datahub_refinery --default-target preprod --force
 
       - name: Execute dbt build in Snowflake (PREPROD) (includes tests)
+        env:
+          SNOWFLAKE_PREPROD_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
+          SNOWFLAKE_PREPROD_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
         run: |
           snow dbt execute "${{ env.DBT_PROJECT_OBJECT_NAME }}" build --target preprod --select "path:models+"
-
-      - name: Auto-create PR to promote TEST → pre-prod
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const {owner, repo} = context.repo;
-            const title = `Promote TEST → pre-prod (SHA ${context.sha.substring(0,7)})`;
-            const body  = `Auto PR created after successful PREPROD deployment.
-
-            Source: test
-            Target: pre-prod
-            Commit: ${context.sha}`;
-            try {
-              const pr = await github.rest.pulls.create({
-                owner,
-                repo,
-                head: "test",
-                base: "pre-prod",
-                title,
-                body
-              });
-              core.info(`Created PR #${pr.data.number}`);
-            } catch (e) {
-              core.warning(`Could not create PR (it may already exist): ${e.message}`);
-            }

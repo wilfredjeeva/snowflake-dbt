@@ -1,9 +1,9 @@
 name: Deploy PREPROD (after TEST success)
 
 on:
-  push:
+  pull_request:
     branches:
-      - "test"
+      - "preprod"
   workflow_dispatch:
 
 permissions:
@@ -68,28 +68,3 @@ jobs:
           SNOWFLAKE_PREPROD_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
         run: |
           snow dbt execute "${{ env.DBT_PROJECT_OBJECT_NAME }}" build --target preprod --select "path:models+"
-
-      - name: Auto-create PR to promote TEST → pre-prod
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const {owner, repo} = context.repo;
-            const title = `Promote TEST → pre-prod (SHA ${context.sha.substring(0,7)})`;
-            const body  = `Auto PR created after successful PREPROD deployment.
-
-            Source: test
-            Target: pre-prod
-            Commit: ${context.sha}`;
-            try {
-              const pr = await github.rest.pulls.create({
-                owner,
-                repo,
-                head: "test",
-                base: "pre-prod",
-                title,
-                body
-              });
-              core.info(`Created PR #${pr.data.number}`);
-            } catch (e) {
-              core.warning(`Could not create PR (it may already exist): ${e.message}`);
-            }

@@ -1,13 +1,13 @@
 name: Deploy DEV (feature/*)
 
 on:
-  push:
-    branches:
-      - "feature/**"
-  # Optional: also validate on PRs into test (runs in DEV target)
-  pull_request:
-    branches:
-      - "test"
+  # Automatic triggers disabled per user request
+  # push:
+  #   branches:
+  #     - "feature/**"
+  # pull_request:
+  #   branches:
+  #     - "test"
   workflow_dispatch: # Enables manual workflow runs from GitHub UI
 
 permissions:

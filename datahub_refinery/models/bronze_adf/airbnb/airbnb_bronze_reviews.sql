@@ -12,6 +12,6 @@ SELECT
     CAST("reviewer_id" AS INT) AS "reviewer_id",
     "reviewer_name",
     "comments",
-        "comments" AS "comments 2"
+    "comments" AS "comments2"
 FROM
     {{ source('LANDING_AIRBNB', 'AirBnBReviews') }}

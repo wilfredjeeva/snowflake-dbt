@@ -1,9 +1,12 @@
 name: Deploy PREPROD (after TEST success)
 
 on:
-  pull_request:
+  workflow_run:
+    workflows: ["Deploy TEST (test branch)"]
+    types:
+      - completed
     branches:
-      - "preprod"
+      - "test"
   workflow_dispatch:
 
 permissions:

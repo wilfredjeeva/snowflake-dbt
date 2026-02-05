@@ -5,8 +5,6 @@ on:
     workflows: ["Deploy TEST (test branch)"]
     types:
       - completed
-    branches:
-      - test
   workflow_dispatch:
 
 permissions:
@@ -20,8 +18,8 @@ jobs:
   preprod_deploy_run:
     runs-on: ubuntu-latest
     environment: preprod
-    # Only run if test workflow succeeded
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    # Only run if test workflow succeeded AND it ran from the 'test' branch
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'test' }}
 
     steps:
       - uses: actions/checkout@v4

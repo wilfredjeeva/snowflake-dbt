@@ -1,4 +1,4 @@
-name: Deploy PREPROD (after TEST success)
+name: Deploy PREPROD (after TEST workflow success)
 
 on:
   workflow_run:

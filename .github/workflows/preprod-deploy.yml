@@ -1,9 +1,12 @@
 name: Deploy PREPROD (after TEST success)
 
 on:
-  pull_request:
+  workflow_run:
+    workflows: ["Deploy TEST (test branch)"]
+    types:
+      - completed
     branches:
-      - "preprod"
+      - test
   workflow_dispatch:
 
 permissions:
@@ -17,6 +20,8 @@ jobs:
   preprod_deploy_run:
     runs-on: ubuntu-latest
     environment: preprod
+    # Only run if test workflow succeeded
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
 
     steps:
       - uses: actions/checkout@v4
@@ -55,7 +60,7 @@ jobs:
         run: |
           cd datahub_refinery
           dbt deps --target preprod
-      - name: Deploy dbt project object to DBTCENTRAL.PREPROD_* schema
+      - name: Deploy dbt project object to DBTCENTRAL.PREPROD_DBTPROJECTNAME schema
         env:
           SNOWFLAKE_PREPROD_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
           SNOWFLAKE_PREPROD_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}

@@ -16,7 +16,6 @@ env:
 
 jobs:
   preprod_deploy_run:
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     environment: preprod
     # Only run if test workflow succeeded AND it ran from the 'test' branch

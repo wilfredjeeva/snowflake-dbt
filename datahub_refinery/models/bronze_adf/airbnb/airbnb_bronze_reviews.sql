@@ -14,7 +14,6 @@ SELECT
     "comments",
     "comments" AS "comments2",
     "comments" AS "comments3",
-    "comments" AS "comments4",
-    "comments" AS "comments5"
+    "comments" AS "comments4"
 FROM
     {{ source('LANDING_AIRBNB', 'AirBnBReviews') }}

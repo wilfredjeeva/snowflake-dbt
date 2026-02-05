@@ -19,21 +19,9 @@ jobs:
     runs-on: ubuntu-latest
     environment: preprod
     # Only run if test workflow succeeded AND it ran from the 'test' branch
-    # TEMPORARILY DISABLED FOR DEBUGGING - will re-enable after we see what values we're getting
-    # if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'test' }}
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'test' }}
 
     steps:
-      - name: Debug workflow_run event
-        run: |
-          echo "=== Event Information ==="
-          echo "Event name: ${{ github.event_name }}"
-          echo "Workflow run conclusion: ${{ github.event.workflow_run.conclusion }}"
-          echo "Workflow run head branch: ${{ github.event.workflow_run.head_branch }}"
-          echo "Workflow run event: ${{ github.event.workflow_run.event }}"
-          echo "Workflow run status: ${{ github.event.workflow_run.status }}"
-          echo "Workflow run name: ${{ github.event.workflow_run.name }}"
-          echo "=== Full Event Payload ==="
-          echo '${{ toJson(github.event) }}'
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:

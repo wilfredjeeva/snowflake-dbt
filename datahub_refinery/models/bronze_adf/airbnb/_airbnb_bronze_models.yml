@@ -14,7 +14,9 @@ models:
           - not_null
           - dbt_expectations.expect_column_values_to_be_of_type:
               column_type: number
-          - compare_row_count:
-              compare_model: "{{ source('LANDING_AIRBNB', 'AirBnBReviews') }}"
-              config:
-                tags: ["dq", "p1"]
+
+    tests:
+      - compare_row_count:
+          compare_model: "{{ source('LANDING_AIRBNB', 'AirBnBReviews') }}"
+          config:
+            tags: ["dq", "p1"]

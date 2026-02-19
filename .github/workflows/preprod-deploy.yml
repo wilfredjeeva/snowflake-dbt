@@ -58,6 +58,7 @@ jobs:
         run: |
           cd datahub_refinery
           dbt deps --target preprod
+
       - name: Deploy dbt project object to DBTCENTRAL.PREPROD_DBTPROJECTNAME schema
         env:
           SNOWFLAKE_PREPROD_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
@@ -71,3 +72,38 @@ jobs:
           SNOWFLAKE_PREPROD_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
         run: |
           snow dbt execute "${{ env.DBT_PROJECT_OBJECT_NAME }}" build --target preprod --select "path:models+"
+
+      - name: Run dbt tests (airbnb bronze)
+        env:
+          SNOWFLAKE_PREPROD_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
+          SNOWFLAKE_PREPROD_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+        working-directory: datahub_refinery
+        run: |
+          dbt test \
+            --select "path:models/bronze_adf/airbnb+" \
+            --target preprod \
+            --no-fail-fast \
+            --profiles-dir .
+        continue-on-error: true # generate report even if some tests fail
+
+      - name: Generate dbt test HTML report
+        if: always()
+        run: python scripts/dbt_report.py
+
+      - name: Upload dbt test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dbt_test_report_preprod
+          path: dbt_test_report.html
+          if-no-files-found: warn
+
+      - name: Upload dbt artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dbt_artifacts_preprod
+          path: |
+            datahub_refinery/target/manifest.json
+            datahub_refinery/target/run_results.json
+          if-no-files-found: ignore

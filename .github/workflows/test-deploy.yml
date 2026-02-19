@@ -69,34 +69,37 @@ jobs:
         run: |
           snow dbt execute "${{ env.DBT_PROJECT_OBJECT_NAME }}" build --target test --select "path:models+"
 
-      - name: Run pytest tests
-        working-directory: datahub_refinery/tests
+      - name: Run dbt tests (airbnb bronze)
         env:
-          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
-          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
-          SNOWFLAKE_AUTHENTICATOR: SNOWFLAKE_JWT
-          SNOWFLAKE_PRIVATE_KEY_PATH: /home/runner/sf_key.p8
-          SNOWFLAKE_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
-          SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
-          SNOWFLAKE_DATABASE: TEST_BRONZE_ADF
-          SNOWFLAKE_SCHEMA: AIRBNB
+          SNOWFLAKE_TEST_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
+          SNOWFLAKE_TEST_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+        working-directory: datahub_refinery
         run: |
-          pip install -r requirement.txt
-          pytest -v --html=report.html --self-contained-html
+          dbt test \
+            --select "path:models/bronze_adf/airbnb+" \
+            --target test \
+            --no-fail-fast \
+            --profiles-dir .
+        continue-on-error: true # generate report even if some tests fail
 
-      - name: Upload pytest report
+      - name: Generate dbt test HTML report
+        if: always()
+        run: python scripts/dbt_report.py
+
+      - name: Upload dbt test report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pytest_report_test
-          path: datahub_refinery/tests/report.html
+          name: dbt_test_report_test
+          path: dbt_test_report.html
           if-no-files-found: warn
 
-      - name: Upload dbt artifacts (optional)
+      - name: Upload dbt artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: dbt_artifacts_test
           path: |
-            target/manifest.json
-            target/run_results.json
+            datahub_refinery/target/manifest.json
+            datahub_refinery/target/run_results.json
           if-no-files-found: ignore

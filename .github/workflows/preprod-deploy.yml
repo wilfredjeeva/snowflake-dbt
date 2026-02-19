@@ -75,6 +75,9 @@ jobs:
 
       - name: Run dbt tests (airbnb bronze)
         env:
+          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+          SNOWFLAKE_PRIVATE_KEY_PATH: /home/runner/sf_key.p8
           SNOWFLAKE_PREPROD_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
           SNOWFLAKE_PREPROD_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
         working-directory: datahub_refinery

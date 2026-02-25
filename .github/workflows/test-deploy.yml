@@ -19,6 +19,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Full history needed for git diff
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -50,6 +53,66 @@ jobs:
           EOF
           chmod 0600 ~/.snowflake/config.toml
 
+      # -----------------------------------------------------------------------
+      # SELECTIVE BUILD LOGIC
+      # Determines whether to run a FULL build or a SELECTIVE (state-based) build
+      # based on which files changed in the push.
+      #
+      # FULL build is triggered when any of these are changed:
+      #   - dbt_project.yml       (project config)
+      #   - profiles.yml          (connection/environment config)
+      #   - packages.yml          (package dependencies)
+      #   - macros/**             (macros affect multiple downstream models)
+      #   - .github/workflows/**  (pipeline config)
+      #
+      # SELECTIVE build is used for all other changes (SQL models, YAML tests/docs).
+      # It uses dbt's state:modified+ selector against the previous manifest.json
+      # to build only the changed model(s) and their downstream dependents.
+      # -----------------------------------------------------------------------
+
+      - name: Detect build scope (full vs selective)
+        id: build_scope
+        run: |
+          # Get list of files changed compared to the previous commit on this branch
+          CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || git diff --name-only HEAD)
+          echo "Changed files:"
+          echo "$CHANGED"
+
+          # Check if any config-level or macro files changed
+          if echo "$CHANGED" | grep -qE \
+            '(dbt_project\.yml|profiles\.yml|packages\.yml|datahub_refinery/macros/|\.github/workflows/)'; then
+            echo "BUILD_TYPE=full" >> $GITHUB_OUTPUT
+            echo "DBT_SELECTOR=path:models+" >> $GITHUB_OUTPUT
+            echo ">>> CONFIG or MACRO change detected — running FULL build"
+          else
+            echo "BUILD_TYPE=selective" >> $GITHUB_OUTPUT
+            echo "DBT_SELECTOR=state:modified+" >> $GITHUB_OUTPUT
+            echo ">>> Model/YAML only change detected — running SELECTIVE build"
+          fi
+
+      - name: Download previous dbt manifest (for selective builds)
+        if: steps.build_scope.outputs.BUILD_TYPE == 'selective'
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          name: dbt_artifacts_test
+          path: previous-manifest/
+          workflow: test-deploy.yml
+          branch: test
+          if_no_artifact_found: warn
+        continue-on-error: true # First-ever run won't have a previous manifest — fall back gracefully
+
+      - name: Fallback to full build if no previous manifest found
+        id: manifest_check
+        if: steps.build_scope.outputs.BUILD_TYPE == 'selective'
+        run: |
+          if [ -f "previous-manifest/manifest.json" ]; then
+            echo "Previous manifest found — selective build will proceed"
+            echo "USE_STATE=true" >> $GITHUB_OUTPUT
+          else
+            echo "No previous manifest found — falling back to FULL build"
+            echo "USE_STATE=false" >> $GITHUB_OUTPUT
+          fi
+
       - name: Install dbt dependencies (packages)
         run: |
           cd datahub_refinery
@@ -62,12 +125,30 @@ jobs:
         run: |
           snow dbt deploy "${{ env.DBT_PROJECT_OBJECT_NAME }}" --source datahub_refinery --profiles-dir datahub_refinery --default-target test --force
 
-      - name: Execute dbt build in Snowflake (TEST) (includes tests)
+      - name: Execute dbt build in Snowflake (TEST) — FULL build
+        if: |
+          steps.build_scope.outputs.BUILD_TYPE == 'full' ||
+          steps.manifest_check.outputs.USE_STATE == 'false'
         env:
           SNOWFLAKE_TEST_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
           SNOWFLAKE_TEST_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
         run: |
+          echo "Running FULL build — all models"
           snow dbt execute "${{ env.DBT_PROJECT_OBJECT_NAME }}" build --target test --select "path:models+"
+
+      - name: Execute dbt build in Snowflake (TEST) — SELECTIVE build (state:modified+)
+        if: |
+          steps.build_scope.outputs.BUILD_TYPE == 'selective' &&
+          steps.manifest_check.outputs.USE_STATE == 'true'
+        env:
+          SNOWFLAKE_TEST_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
+          SNOWFLAKE_TEST_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+        run: |
+          echo "Running SELECTIVE build — changed models + downstream only"
+          snow dbt execute "${{ env.DBT_PROJECT_OBJECT_NAME }}" build \
+            --target test \
+            --select "state:modified+" \
+            --state ./previous-manifest/
 
       - name: Run dbt tests (airbnb bronze)
         env:
@@ -78,11 +159,24 @@ jobs:
           SNOWFLAKE_TEST_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
         working-directory: datahub_refinery
         run: |
-          dbt test \
-            --select "path:models/bronze_adf/airbnb+" \
-            --target test \
-            --no-fail-fast \
-            --profiles-dir .
+          # Test scope mirrors build scope: selective for model changes, full for config/macro changes
+          if [ "${{ steps.build_scope.outputs.BUILD_TYPE }}" == "selective" ] && \
+             [ "${{ steps.manifest_check.outputs.USE_STATE }}" == "true" ]; then
+            echo "Running SELECTIVE dbt tests (state:modified+)"
+            dbt test \
+              --select "state:modified+" \
+              --state ../previous-manifest/ \
+              --target test \
+              --no-fail-fast \
+              --profiles-dir .
+          else
+            echo "Running FULL dbt tests (all airbnb bronze models)"
+            dbt test \
+              --select "path:models/bronze_adf/airbnb+" \
+              --target test \
+              --no-fail-fast \
+              --profiles-dir .
+          fi
         continue-on-error: true # generate report even if some tests fail
 
       - name: Generate dbt test HTML report

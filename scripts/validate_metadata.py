@@ -35,10 +35,17 @@ VALID_CLASSIFICATIONS = {"internal", "confidential", "public", "restricted"}
 def find_model_yamls(models_dir: str) -> list[str]:
     """Find all model schema YAML files (exclude sources)."""
     pattern = os.path.join(models_dir, "**", "*.yml")
-    return [
-        f for f in glob.glob(pattern, recursive=True)
-        if not os.path.basename(f).startswith("_") or "models" in open(f).read()
-    ]
+    model_files: list[str] = []
+    for path in glob.glob(pattern, recursive=True):
+        basename = os.path.basename(path)
+        if not basename.startswith("_"):
+            model_files.append(path)
+            continue
+        # For files starting with "_", only include if they contain "models"
+        with open(path, encoding="utf-8") as fh:
+            if "models" in fh.read():
+                model_files.append(path)
+    return model_files
 
 
 def validate_model(model: dict, yaml_file: str) -> list[str]:

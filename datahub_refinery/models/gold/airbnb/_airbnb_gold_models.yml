@@ -1,0 +1,48 @@
+version: 2
+
+models:
+  - name: airbnb_gold_fact_listings
+    description: "Gold layer fact table for Airbnb listings, joining bronze listings with geography dimensions."
+    config:
+      tags: ["domain:airbnb", "layer:gold", "dq", "p1"]
+      meta:
+        owner: "data-engineering"
+        data_classification: "internal"
+
+    columns:
+      - name: LISTING_ID
+        description: "Unique identifier for the property listing."
+      - name: LISTING_NAME
+        description: "Name of the listing as provided by the host."
+      - name: HOST_ID
+        description: "Unique identifier for the listing host."
+      - name: GEOGRAPHY_ID
+        description: "Foreign key to the geography dimension."
+      - name: ROOM_TYPE
+        description: "Type of room offered (e.g., Entire home, Private room)."
+      - name: PRICE
+        description: "Nightly price of the listing in GBP."
+      - name: MINIMUM_NIGHTS
+        description: "Minimum number of nights required for booking."
+      - name: AVAILABILITY_365
+        description: "Number of days the listing is available in the next 365 days."
+
+  - name: airbnb_gold_dim_listing_details
+    description: "Gold layer dimension table for detailed Airbnb listing attributes."
+    config:
+      tags: ["domain:airbnb", "layer:gold", "dq", "p1"]
+      meta:
+        owner: "data-engineering"
+        data_classification: "internal"
+
+    columns:
+      - name: LISTING_ID
+        description: "Unique identifier for the property listing."
+      - name: NUMBER_OF_REVIEWS
+        description: "Total number of reviews for the listing."
+      - name: REVIEWS_PER_MONTH
+        description: "Average number of reviews received per month."
+      - name: LAST_REVIEW
+        description: "Date of the most recent review."
+      - name: CALCULATED_HOST_LISTINGS_COUNT
+        description: "Total number of listings the host manages."

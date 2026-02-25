@@ -113,6 +113,16 @@ jobs:
             echo "USE_STATE=false" >> $GITHUB_OUTPUT
           fi
 
+      # -----------------------------------------------------------------------
+      # GOVERNANCE VALIDATION — runs before dbt build
+      # Fails the pipeline (and blocks PREPROD promotion) if any model
+      # is missing: description, domain tag, meta.owner, meta.data_classification
+      # -----------------------------------------------------------------------
+      - name: Validate governance metadata (tags, owner, classification)
+        run: |
+          pip install pyyaml --quiet
+          python scripts/validate_metadata.py
+
       - name: Install dbt dependencies (packages)
         run: |
           cd datahub_refinery

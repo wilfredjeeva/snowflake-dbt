@@ -97,6 +97,8 @@ def validate_yaml_file(yaml_file: str) -> list[str]:
     try:
         with open(yaml_file, "r", encoding="utf-8") as f:
             content = yaml.safe_load(f)
+    except OSError as e:
+        return [f"[{yaml_file}]: file error — {e}"]
     except yaml.YAMLError as e:
         return [f"[{yaml_file}]: YAML parse error — {e}"]
 

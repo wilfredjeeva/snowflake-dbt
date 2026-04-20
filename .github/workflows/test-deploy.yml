@@ -4,123 +4,118 @@ on:
   push:
     branches:
       - "test"
+      - "feature/DHE-404_testworkflow"
   workflow_dispatch:
 
 permissions:
   contents: read
-
-env:
-  DBT_PROJECT_OBJECT_NAME: DATAHUB_DBT_MODELS
+  actions: read
 
 jobs:
   test_deploy_run:
     runs-on: ubuntu-latest
     environment: test
+    timeout-minutes: 45
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          fetch-depth: 0 # Full history needed for git diff
+          fetch-depth: 0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
         with:
           python-version: "3.11"
 
-      - name: Install Snowflake CLI + dbt
+      - name: Cache pip dependencies
+        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-dbt-${{ hashFiles('**/packages.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-dbt-
+
+      - name: Install dbt and Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install --upgrade snowflake-cli dbt-core dbt-snowflake
+          pip install dbt-core==1.9.4 dbt-snowflake==1.9.2 pyyaml
 
       - name: Write Snowflake private key (from GitHub Environment secret)
         run: |
-          printf '%s' "${{ secrets.SNOWFLAKE_PRIVATE_KEY_B64 }}" | tr -d '\n' | base64 -d > $HOME/sf_key.p8
+          printf '%s' "${{ secrets.SNOWFLAKE_PRIVATE_KEY }}" > $HOME/sf_key.p8
           chmod 600 $HOME/sf_key.p8
-
-      - name: Configure Snowflake CLI connection (ci)
-        run: |
-          mkdir -p ~/.snowflake
-          cat > ~/.snowflake/config.toml <<'EOF'
-          default_connection_name = "ci"
-          [connections.ci]
-          account = "${{ secrets.SNOWFLAKE_ACCOUNT }}"
-          user = "${{ secrets.SNOWFLAKE_USER }}"
-          role = "${{ secrets.SNOWFLAKE_ROLE }}"
-          warehouse = "${{ secrets.SNOWFLAKE_WAREHOUSE }}"
-          database = "${{ secrets.SNOWFLAKE_PROJECT_DB }}"
-          schema   = "${{ secrets.SNOWFLAKE_PROJECT_SCHEMA }}"
-          authenticator = "SNOWFLAKE_JWT"
-          private_key_path = "/home/runner/sf_key.p8"
-          EOF
-          chmod 0600 ~/.snowflake/config.toml
 
       # -----------------------------------------------------------------------
       # SELECTIVE BUILD LOGIC
-      # Determines whether to run a FULL build or a SELECTIVE (state-based) build
-      # based on which files changed in the push.
-      #
-      # FULL build is triggered when any of these are changed:
-      #   - dbt_project.yml       (project config)
-      #   - profiles.yml          (connection/environment config)
-      #   - packages.yml          (package dependencies)
-      #   - macros/**             (macros affect multiple downstream models)
-      #   - .github/workflows/**  (pipeline config)
-      #
-      # SELECTIVE build is used for all other changes (SQL models, YAML tests/docs).
-      # It uses dbt's state:modified+ selector against the previous manifest.json
-      # to build only the changed model(s) and their downstream dependents.
+      # FULL build  → config/macro/workflow files changed
+      # SELECTIVE   → SQL model or YAML schema files changed only
       # -----------------------------------------------------------------------
-
       - name: Detect build scope (full vs selective)
         id: build_scope
         run: |
-          # Get list of files changed compared to the previous commit on this branch
           CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || git diff --name-only HEAD)
           echo "Changed files:"
           echo "$CHANGED"
-
-          # Check if any config-level or macro files changed
           if echo "$CHANGED" | grep -qE \
             '(dbt_project\.yml|profiles\.yml|packages\.yml|datahub_refinery/macros/|\.github/workflows/)'; then
             echo "BUILD_TYPE=full" >> $GITHUB_OUTPUT
-            echo "DBT_SELECTOR=path:models+" >> $GITHUB_OUTPUT
-            echo ">>> CONFIG or MACRO change detected — running FULL build"
+            echo ">>> CONFIG or MACRO change - running FULL build"
           else
             echo "BUILD_TYPE=selective" >> $GITHUB_OUTPUT
-            echo "DBT_SELECTOR=state:modified+" >> $GITHUB_OUTPUT
-            echo ">>> Model/YAML only change detected — running SELECTIVE build"
+            echo ">>> Model/YAML only change - running SELECTIVE build"
           fi
 
-      - name: Download previous dbt manifest (for selective builds)
+      - name: Get last completed run ID (for manifest)
+        id: last_run
         if: steps.build_scope.outputs.BUILD_TYPE == 'selective'
-        uses: dawidd6/action-download-artifact@v6
-        with:
-          name: dbt_artifacts_test
-          path: previous-manifest/
-          workflow: test-deploy.yml
-          branch: test
-          if_no_artifact_found: warn
-        continue-on-error: true # First-ever run won't have a previous manifest — fall back gracefully
+        run: |
+          # Look for most recent completed run (success OR failure) — the manifest
+          # is always uploaded via 'if: always()', so failed runs are valid sources.
+          RUN_ID=$(gh run list \
+            --workflow test-deploy.yml \
+            --limit 10 \
+            --json databaseId,conclusion \
+            --jq '[.[] | select(.conclusion == "success" or .conclusion == "failure")] | .[0].databaseId' \
+            2>/dev/null || echo "")
+          echo "RUN_ID=$RUN_ID" >> $GITHUB_OUTPUT
+          echo "Last completed run ID: $RUN_ID"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Fallback to full build if no previous manifest found
+      - name: Download previous dbt manifest (for selective builds)
+        if: steps.build_scope.outputs.BUILD_TYPE == 'selective' &&
+          steps.last_run.outputs.RUN_ID != ''
+        run: |
+          mkdir -p previous-manifest
+          echo "Attempting to download manifest from run ${{ steps.last_run.outputs.RUN_ID }}..."
+          if gh run download "${{ steps.last_run.outputs.RUN_ID }}" \
+              --name dbt_artifacts_test \
+              --dir previous-manifest/ 2>/dev/null; then
+            echo "Manifest downloaded successfully"
+          else
+            echo "WARNING: Manifest download failed (artifact may have expired or been deleted)"
+            echo "Pipeline will fall back to a full build"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Fallback check - manifest found?
         id: manifest_check
         if: steps.build_scope.outputs.BUILD_TYPE == 'selective'
         run: |
+          echo "Contents of previous-manifest/:" && find previous-manifest/ -type f 2>/dev/null || echo "(directory empty or missing)"
           if [ -f "previous-manifest/manifest.json" ]; then
-            echo "Previous manifest found — selective build will proceed"
+            echo "Manifest found - selective build with state comparison"
             echo "USE_STATE=true" >> $GITHUB_OUTPUT
           else
-            echo "No previous manifest found — falling back to FULL build"
+            echo "No manifest found - will fall back to full build"
             echo "USE_STATE=false" >> $GITHUB_OUTPUT
           fi
 
       # -----------------------------------------------------------------------
-      # GOVERNANCE VALIDATION — runs before dbt build
-      # Fails the pipeline (and blocks PREPROD promotion) if any model
-      # is missing: description, domain tag, meta.owner, meta.data_classification
+      # GOVERNANCE VALIDATION - blocks pipeline if metadata is incomplete
       # -----------------------------------------------------------------------
       - name: Validate governance metadata (tags, owner, classification)
         run: |
-          pip install pyyaml --quiet
           python scripts/validate_metadata.py
 
       - name: Install dbt dependencies (packages)
@@ -128,66 +123,57 @@ jobs:
           cd datahub_refinery
           dbt deps --target test
 
-      - name: Deploy dbt project object to DBTCENTRAL.TEST_* schema
+      - name: Write CI profiles.yml
         env:
-          SNOWFLAKE_TEST_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
-          SNOWFLAKE_TEST_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+          SF_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SF_USER: ${{ secrets.SNOWFLAKE_USER }}
+          SF_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
+          SF_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+          SF_DB: ${{ secrets.SNOWFLAKE_DB }}
+          SF_SCHEMA: ${{ secrets.SNOWFLAKE_SCHEMA }}
+          SF_PASSPHRASE: ${{ secrets.SNOWFLAKE_KEY_PASSPHRASE }}
         run: |
-          snow dbt deploy "${{ env.DBT_PROJECT_OBJECT_NAME }}" --source datahub_refinery --profiles-dir datahub_refinery --default-target test --force
+          python3 - << 'PYEOF'
+          import os, pathlib, json
+          e = os.environ
+          content = f"""datahub_refinery:
+            target: test
+            outputs:
+              test:
+                type: snowflake
+                account: {json.dumps(e['SF_ACCOUNT'])}
+                user: {json.dumps(e['SF_USER'])}
+                role: {json.dumps(e['SF_ROLE'])}
+                warehouse: {json.dumps(e['SF_WAREHOUSE'])}
+                database: {json.dumps(e['SF_DB'])}
+                schema: {json.dumps(e['SF_SCHEMA'])}
+                private_key_path: "/home/runner/sf_key.p8"
+                private_key_passphrase: {json.dumps(e['SF_PASSPHRASE'])}
+                threads: 8
+          """
+          pathlib.Path("datahub_refinery/profiles.yml").write_text(content)
+          print("CI profiles.yml written for test")
+          PYEOF
 
-      - name: Execute dbt build in Snowflake (TEST) — FULL build
-        if: |
-          steps.build_scope.outputs.BUILD_TYPE == 'full' ||
-          steps.manifest_check.outputs.USE_STATE == 'false'
-        env:
-          SNOWFLAKE_TEST_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
-          SNOWFLAKE_TEST_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
-        run: |
-          echo "Running FULL build — all models"
-          snow dbt execute "${{ env.DBT_PROJECT_OBJECT_NAME }}" build --target test --select "path:models+"
-
-      - name: Execute dbt build in Snowflake (TEST) — SELECTIVE build (state:modified+)
-        if: |
-          steps.build_scope.outputs.BUILD_TYPE == 'selective' &&
-          steps.manifest_check.outputs.USE_STATE == 'true'
-        env:
-          SNOWFLAKE_TEST_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
-          SNOWFLAKE_TEST_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
-        run: |
-          echo "Running SELECTIVE build — changed models + downstream only"
-          snow dbt execute "${{ env.DBT_PROJECT_OBJECT_NAME }}" build \
-            --target test \
-            --select "state:modified+" \
-            --state ./previous-manifest/
-
-      - name: Run dbt tests (airbnb bronze)
-        env:
-          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
-          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
-          SNOWFLAKE_PRIVATE_KEY_PATH: /home/runner/sf_key.p8
-          SNOWFLAKE_TEST_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
-          SNOWFLAKE_TEST_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+      # -----------------------------------------------------------------------
+      # dbt build = dbt run + dbt test combined.
+      # No separate "Run dbt tests" step needed - tests run inside this step.
+      # Selector includes upstream (+) and downstream (+) of changed models.
+      # -----------------------------------------------------------------------
+      - name: Build changed dbt models (selective, upstream + changed + downstream)
+        timeout-minutes: 30
         working-directory: datahub_refinery
         run: |
-          # Test scope mirrors build scope: selective for model changes, full for config/macro changes
-          if [ "${{ steps.build_scope.outputs.BUILD_TYPE }}" == "selective" ] && \
-             [ "${{ steps.manifest_check.outputs.USE_STATE }}" == "true" ]; then
-            echo "Running SELECTIVE dbt tests (state:modified+)"
-            dbt test \
-              --select "state:modified+" \
-              --state ../previous-manifest/ \
-              --target test \
-              --no-fail-fast \
-              --profiles-dir .
+          if [ "${{ steps.build_scope.outputs.BUILD_TYPE }}" == "full" ]; then
+            echo "FULL build - config/macro/workflow change detected"
+            dbt build --select "path:models+" --target test --no-fail-fast --profiles-dir .
+          elif [ "${{ steps.manifest_check.outputs.USE_STATE }}" == "true" ]; then
+            echo "SELECTIVE build - +state:modified+ (upstream + changed + downstream)"
+            dbt build --select "+state:modified+" --state ../previous-manifest/ --target test --no-fail-fast --profiles-dir .
           else
-            echo "Running FULL dbt tests (all airbnb bronze models)"
-            dbt test \
-              --select "path:models/bronze_adf/airbnb+" \
-              --target test \
-              --no-fail-fast \
-              --profiles-dir .
+            echo "No manifest available (expired or first run) - falling back to FULL build"
+            dbt build --select "path:models+" --target test --no-fail-fast --profiles-dir .
           fi
-        continue-on-error: true # generate report even if some tests fail
 
       - name: Generate dbt test HTML report
         if: always()
@@ -195,18 +181,28 @@ jobs:
 
       - name: Upload dbt test report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
         with:
           name: dbt_test_report_test
           path: dbt_test_report.html
           if-no-files-found: warn
 
+      - name: Stage dbt artifacts for upload
+        if: always()
+        run: |
+          # Copy to a flat directory so the artifact contains manifest.json at its
+          # root (not datahub_refinery/target/manifest.json). This ensures
+          # 'gh run download --dir previous-manifest/' places the file at
+          # previous-manifest/manifest.json — exactly where the fallback check looks.
+          mkdir -p dbt_artifacts_staging
+          cp datahub_refinery/target/manifest.json dbt_artifacts_staging/ 2>/dev/null || true
+          cp datahub_refinery/target/run_results.json dbt_artifacts_staging/ 2>/dev/null || true
+
       - name: Upload dbt artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
         with:
           name: dbt_artifacts_test
-          path: |
-            datahub_refinery/target/manifest.json
-            datahub_refinery/target/run_results.json
+          path: dbt_artifacts_staging/
           if-no-files-found: ignore
+          retention-days: 90

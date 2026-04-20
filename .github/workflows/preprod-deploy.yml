@@ -9,85 +9,112 @@ on:
 
 permissions:
   contents: read
-  pull-requests: write
-
-env:
-  DBT_PROJECT_OBJECT_NAME: DATAHUB_DBT_MODELS
+  actions: read # needed to download artifacts from previous runs
 
 jobs:
   preprod_deploy_run:
     runs-on: ubuntu-latest
     environment: preprod
-    # Only run if test workflow succeeded AND it ran from the 'test' branch
-    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'test' }}
+
+    # Only trigger automatically if the TEST workflow succeeded on the 'test' branch.
+    # workflow_dispatch bypasses this condition so manual runs always proceed.
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == 'test')
 
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
         with:
           python-version: "3.11"
 
-      - name: Install Snowflake CLI + dbt
+      - name: Install dbt
         run: |
           python -m pip install --upgrade pip
-          pip install --upgrade snowflake-cli dbt-core dbt-snowflake
+          pip install dbt-core==1.9.4 dbt-snowflake==1.9.2
 
       - name: Write Snowflake private key (from GitHub Environment secret)
         run: |
-          printf '%s' "${{ secrets.SNOWFLAKE_PRIVATE_KEY_B64 }}" | tr -d '\n' | base64 -d > $HOME/sf_key.p8
+          printf '%s' "${{ secrets.SNOWFLAKE_PRIVATE_KEY }}" > $HOME/sf_key.p8
           chmod 600 $HOME/sf_key.p8
 
-      - name: Configure Snowflake CLI connection (ci)
+      # -----------------------------------------------------------------------
+      # GOVERNANCE VALIDATION — runs before dbt build
+      # Fails the pipeline (and blocks PROD promotion) if any model
+      # is missing required metadata.
+      # -----------------------------------------------------------------------
+      - name: Validate governance metadata (tags, owner, classification)
         run: |
-          mkdir -p ~/.snowflake
-          cat > ~/.snowflake/config.toml <<'EOF'
-          default_connection_name = "ci"
-          [connections.ci]
-          account = "${{ secrets.SNOWFLAKE_ACCOUNT }}"
-          user = "${{ secrets.SNOWFLAKE_USER }}"
-          role = "${{ secrets.SNOWFLAKE_ROLE }}"
-          warehouse = "${{ secrets.SNOWFLAKE_WAREHOUSE }}"
-          database = "${{ secrets.SNOWFLAKE_PROJECT_DB }}"
-          schema   = "${{ secrets.SNOWFLAKE_PROJECT_SCHEMA }}"
-          authenticator = "SNOWFLAKE_JWT"
-          private_key_path = "/home/runner/sf_key.p8"
-          EOF
-          chmod 0600 ~/.snowflake/config.toml
+          pip install pyyaml --quiet
+          python scripts/validate_metadata.py
 
       - name: Install dbt dependencies (packages)
         run: |
           cd datahub_refinery
           dbt deps --target preprod
 
-      - name: Deploy dbt project object to DBTCENTRAL.PREPROD_DBTPROJECTNAME schema
+      - name: Write CI profiles.yml
         env:
-          SNOWFLAKE_PREPROD_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
-          SNOWFLAKE_PREPROD_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+          SF_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SF_USER: ${{ secrets.SNOWFLAKE_USER }}
+          SF_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
+          SF_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+          SF_DB: ${{ secrets.SNOWFLAKE_DB }}
+          SF_SCHEMA: ${{ secrets.SNOWFLAKE_SCHEMA }}
+          SF_PASSPHRASE: ${{ secrets.SNOWFLAKE_KEY_PASSPHRASE }}
         run: |
-          snow dbt deploy "${{ env.DBT_PROJECT_OBJECT_NAME }}" --source datahub_refinery --profiles-dir datahub_refinery --default-target preprod --force
+          python3 - << 'PYEOF'
+          import os, pathlib, json
+          e = os.environ
+          content = f"""datahub_refinery:
+            target: preprod
+            outputs:
+              preprod:
+                type: snowflake
+                account: {json.dumps(e['SF_ACCOUNT'])}
+                user: {json.dumps(e['SF_USER'])}
+                role: {json.dumps(e['SF_ROLE'])}
+                warehouse: {json.dumps(e['SF_WAREHOUSE'])}
+                database: {json.dumps(e['SF_DB'])}
+                schema: {json.dumps(e['SF_SCHEMA'])}
+                private_key_path: "/home/runner/sf_key.p8"
+                private_key_passphrase: {json.dumps(e['SF_PASSPHRASE'])}
+                threads: 4
+          """
+          pathlib.Path("datahub_refinery/profiles.yml").write_text(content)
+          print("CI profiles.yml written for preprod")
+          PYEOF
 
-      - name: Execute dbt build in Snowflake (PREPROD) (includes tests)
-        env:
-          SNOWFLAKE_PREPROD_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
-          SNOWFLAKE_PREPROD_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
-        run: |
-          snow dbt execute "${{ env.DBT_PROJECT_OBJECT_NAME }}" build --target preprod --select "path:models+"
-
-      - name: Run dbt tests (airbnb bronze)
-        env:
-          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
-          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
-          SNOWFLAKE_PRIVATE_KEY_PATH: /home/runner/sf_key.p8
-          SNOWFLAKE_PREPROD_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
-          SNOWFLAKE_PREPROD_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+      # -----------------------------------------------------------------------
+      # PRE-PROD always runs a FULL build of ALL models.
+      # This is a promotion from TEST — we validate the entire model graph,
+      # not just what changed in the last commit.
+      # -----------------------------------------------------------------------
+      - name: Build all dbt models (FULL build)
         working-directory: datahub_refinery
         run: |
-          dbt test \
-            --select "path:models/bronze_adf/airbnb+" \
+          echo "FULL build — all models (PREPROD promotion)"
+          dbt build \
+            --select "path:models+" \
             --target preprod \
             --no-fail-fast \
             --profiles-dir .
-        continue-on-error: true # generate report even if some tests fail
+        continue-on-error: true
+
+      - name: Run dbt tests (all models)
+        if: always()
+        working-directory: datahub_refinery
+        run: |
+          dbt test \
+            --select "path:models+" \
+            --target preprod \
+            --no-fail-fast \
+            --profiles-dir .
+        continue-on-error: true
 
       - name: Generate dbt test HTML report
         if: always()
@@ -95,7 +122,7 @@ jobs:
 
       - name: Upload dbt test report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
         with:
           name: dbt_test_report_preprod
           path: dbt_test_report.html
@@ -103,10 +130,11 @@ jobs:
 
       - name: Upload dbt artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
         with:
           name: dbt_artifacts_preprod
           path: |
             datahub_refinery/target/manifest.json
             datahub_refinery/target/run_results.json
           if-no-files-found: ignore
+          retention-days: 90

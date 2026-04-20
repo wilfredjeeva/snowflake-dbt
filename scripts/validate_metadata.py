@@ -4,17 +4,21 @@ validate_metadata.py
 ====================
 Governance metadata validation script for dbt models.
 
-Runs BEFORE dbt build in the CI/CD pipeline (test-deploy.yml).
+Runs BEFORE dbt build in the CI/CD pipeline.
 Fails with exit code 1 if any model YAML violates governance standards.
 
 Rules enforced:
-  1. Every model must have a non-empty 'description'
-  2. Every model must have at least one 'domain:*' tag
-  3. Every model must have 'meta.owner' defined
-  4. Every model must have 'meta.data_classification' defined
+  1. Every model must have a non-empty 'description'                        [ALL models]
+  2. Every model must have at least one 'domain:*' tag                      [ALL models]
+  3. Every model must have 'meta.owner' defined                             [ALL models]
+  4. Every model must have 'meta.data_classification' defined               [ALL models]
+  5. Every model must have at least one 'dataset:*' tag                     [GOLD & PLATINUM only]
+  6. Every model must have a 'DataSet_Tag' (config.tags or config.meta)    [GOLD & PLATINUM only]
 
-Valid domain tags  : domain:airbnb, domain:finance, domain:operations, etc.
-Valid data_classification values: internal, confidential, public, restricted
+Valid domain tags             : domain:airbnb, domain:finance, domain:operations, etc.
+Valid data_classification      : internal, confidential, public, restricted
+dataset:* tag examples         : dataset:airbnb, dataset:addressbase, dataset:finance
+DataSet_Tag examples           : DataSet_Tag:airbnb | dataset_tag: airbnb (in meta)
 """
 
 import os
@@ -27,6 +31,10 @@ import yaml
 # ──────────────────────────────────────────────────────────────────────────────
 MODELS_DIR = os.path.join(os.path.dirname(__file__), "..", "datahub_refinery", "models")
 VALID_CLASSIFICATIONS = {"internal", "confidential", "public", "restricted"}
+
+# Model path segments that identify gold & platinum tier models
+GOLD_PLATINUM_SEGMENTS = {"gold", "platinum"}
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -41,34 +49,45 @@ def find_model_yamls(models_dir: str) -> list[str]:
     ]
 
 
+def is_gold_or_platinum(yaml_file: str) -> bool:
+    """Return True if the YAML file is under a gold or platinum model directory."""
+    parts = set(yaml_file.replace("\\", "/").lower().split("/"))
+    return bool(parts & GOLD_PLATINUM_SEGMENTS)
+
+
 def validate_model(model: dict, yaml_file: str) -> list[str]:
     """Validate a single model entry. Returns list of violations."""
     violations = []
     name = model.get("name", "<unnamed>")
     prefix = f"[{os.path.basename(yaml_file)}] model '{name}'"
 
-    # Rule 1: description must be non-empty
+    config = model.get("config", {}) or {}
+    tags = config.get("tags", []) or []
+    if isinstance(tags, str):
+        tags = [tags]
+    meta = config.get("meta", {}) or {}
+
+    gold_platinum = is_gold_or_platinum(yaml_file)
+
+    # ── Rule 1: description must be non-empty ─────────────────────────────────
     description = model.get("description", "").strip()
     if not description:
         violations.append(f"{prefix}: missing or empty 'description'")
 
-    # Rule 2: at least one domain:* tag required
-    config = model.get("config", {}) or {}
-    tags = config.get("tags", []) or []
-    domain_tags = [t for t in tags if t.startswith("domain:")]
+    # ── Rule 2: at least one domain:* tag required (ALL models) ──────────────
+    domain_tags = [t for t in tags if t.lower().startswith("domain:")]
     if not domain_tags:
         violations.append(
             f"{prefix}: missing domain tag — add e.g. 'domain:airbnb' to config.tags"
         )
 
-    # Rule 3: meta.owner required
-    meta = config.get("meta", {}) or {}
+    # ── Rule 3: meta.owner required (ALL models) ─────────────────────────────
     if not meta.get("owner", "").strip():
         violations.append(
             f"{prefix}: missing 'meta.owner' — add e.g. owner: 'data-engineering'"
         )
 
-    # Rule 4: meta.data_classification required and must be a known value
+    # ── Rule 4: meta.data_classification required (ALL models) ───────────────
     classification = meta.get("data_classification", "").strip().lower()
     if not classification:
         violations.append(
@@ -80,6 +99,27 @@ def validate_model(model: dict, yaml_file: str) -> list[str]:
             f"{prefix}: invalid data_classification '{classification}' "
             f"— valid values: {sorted(VALID_CLASSIFICATIONS)}"
         )
+
+    # ── Rules 5 & 6: GOLD & PLATINUM only ────────────────────────────────────
+    if gold_platinum:
+
+        # Rule 5: at least one dataset:* tag required
+        dataset_tags = [t for t in tags if t.lower().startswith("dataset:")]
+        if not dataset_tags:
+            violations.append(
+                f"{prefix}: [GOLD/PLATINUM] missing 'dataset:*' tag "
+                f"— add e.g. 'dataset:airbnb' to config.tags"
+            )
+
+        # Rule 6: DataSet_Tag required (in config.tags OR config.meta)
+        dataset_tag_in_list = [t for t in tags if t.lower().startswith("dataset_tag")]
+        dataset_tag_in_meta = str(meta.get("dataset_tag", "")).strip()
+        if not dataset_tag_in_list and not dataset_tag_in_meta:
+            violations.append(
+                f"{prefix}: [GOLD/PLATINUM] missing 'DataSet_Tag' "
+                f"— add e.g. 'DataSet_Tag:airbnb' to config.tags "
+                f"OR dataset_tag: airbnb to config.meta"
+            )
 
     return violations
 
@@ -125,7 +165,8 @@ def main():
             all_violations.extend(violations)
         else:
             rel = os.path.relpath(yaml_file, MODELS_DIR)
-            print(f"  ✅ {rel}")
+            tier = " [GOLD/PLATINUM]" if is_gold_or_platinum(yaml_file) else ""
+            print(f"  ✅ {rel}{tier}")
 
     print()
 

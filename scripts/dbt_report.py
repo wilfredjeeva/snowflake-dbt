@@ -29,13 +29,47 @@ OUTPUT_PATH      = Path("dbt_test_report.html")
 # ── Load files ─────────────────────────────────────────────────────────────────
 def load_json(path: Path) -> dict:
     if not path.exists():
-        print(f"[ERROR] File not found: {path}", file=sys.stderr)
-        sys.exit(1)
+        return None
     with open(path, encoding="utf-8") as fh:
         return json.load(fh)
 
 run_results = load_json(RUN_RESULTS_PATH)
 manifest    = load_json(MANIFEST_PATH)
+
+# ── Handle missing files (build failed before dbt wrote any output) ────────────
+if run_results is None:
+    error_html = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <title>dbt Test Report</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+           background:#f5f7fa; display:flex; align-items:center; justify-content:center;
+           min-height:100vh; margin:0; }
+    .box { background:#fff; border-radius:12px; padding:48px 56px; text-align:center;
+           box-shadow:0 2px 12px rgba(0,0,0,.1); max-width:520px; }
+    h1 { color:#dc3545; font-size:24px; margin-bottom:16px; }
+    p  { color:#555; line-height:1.6; margin-bottom:10px; }
+    code { background:#f0f0f0; padding:2px 6px; border-radius:4px; font-size:13px; }
+  </style>
+</head>
+<body>
+  <div class="box">
+    <h1>&#10060; Build Failed — No Test Results</h1>
+    <p>The dbt build step failed before any models were compiled or tested.</p>
+    <p><code>datahub_refinery/target/run_results.json</code> was not produced.</p>
+    <p>Check the <strong>Build changed dbt models</strong> step in the pipeline
+       for the compilation error and fix the broken model reference before re-running.</p>
+  </div>
+</body>
+</html>
+"""
+    OUTPUT_PATH.write_text(error_html, encoding="utf-8")
+    print(f"[WARN] run_results.json not found — build likely failed at compilation.")
+    print(f"[OK]  Error report written to: {OUTPUT_PATH.resolve()}")
+    sys.exit(0)  # exit 0 so the upload step still runs
+
 
 # ── Parse results ──────────────────────────────────────────────────────────────
 results = run_results.get("results", [])

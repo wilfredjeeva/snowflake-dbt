@@ -1,0 +1,85 @@
+# Enforce conventional commits by checking PR title.
+# We use squash-and-merge, so the PR title becomes the merge commit message.
+#
+# Uses only bash + curl (GitHub API) - no third-party actions.
+# This complies with the org policy requiring all actions to be GitHub-owned
+# or pinned to a commit SHA from the enterprise.
+
+name: Lint PR
+
+on:
+    pull_request:
+        types:
+            - opened
+            - edited
+            - synchronize
+
+permissions:
+    pull-requests: write
+
+jobs:
+    main:
+        name: Validate PR title
+        runs-on: ubuntu-latest
+        steps:
+            - name: Check PR title follows Conventional Commits
+              env:
+                  PR_TITLE: ${{ github.event.pull_request.title }}
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  PR_NUMBER: ${{ github.event.pull_request.number }}
+                  REPO: ${{ github.repository }}
+              run: |
+                  # Conventional Commits pattern:
+                  # type(scope): description
+                  # Allowed types + optional scope (e.g. DHE-123, deps, deps-dev)
+                  PATTERN='^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert|hotfix)(\([^)]+\))?: .+'
+                  COMMENT_HEADER="<!-- pr-title-lint-error -->"
+
+                  delete_lint_comment() {
+                    COMMENT_ID=$(curl -sSL \
+                      -H "Authorization: Bearer $GH_TOKEN" \
+                      -H "Accept: application/vnd.github+json" \
+                      "https://api.github.com/repos/$REPO/issues/$PR_NUMBER/comments" \
+                      | jq -r ".[] | select(.body | startswith(\"$COMMENT_HEADER\")) | .id" | head -1)
+
+                    if [ -n "$COMMENT_ID" ]; then
+                      curl -sSL -X DELETE \
+                        -H "Authorization: Bearer $GH_TOKEN" \
+                        -H "Accept: application/vnd.github+json" \
+                        "https://api.github.com/repos/$REPO/issues/comments/$COMMENT_ID"
+                      echo "Deleted previous lint error comment."
+                    fi
+                  }
+
+                  if echo "$PR_TITLE" | grep -qP "$PATTERN"; then
+                    echo "✅ PR title is valid: $PR_TITLE"
+                    delete_lint_comment
+                  else
+                    echo "❌ PR title does not follow Conventional Commits format"
+                    echo "Title: $PR_TITLE"
+
+                    BODY="${COMMENT_HEADER}
+                  ## 🚨 PR Title Lint Error
+
+                  Hey there! Your PR title needs to follow the [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/) specification.
+
+                  **Expected format:** \`type(scope): description\`
+
+                  **Allowed types:** \`feat\`, \`fix\`, \`docs\`, \`style\`, \`refactor\`, \`perf\`, \`test\`, \`build\`, \`ci\`, \`chore\`, \`revert\`, \`hotfix\`
+
+                  **Examples:**
+                  - \`feat(DHE-123): add new transformation model\`
+                  - \`fix(deps): update dbt version\`
+                  - \`chore: update gitignore\`
+
+                  **Your title:** \`${PR_TITLE}\`"
+
+                    # Post or update the lint error comment
+                    curl -sSL -X POST \
+                      -H "Authorization: Bearer $GH_TOKEN" \
+                      -H "Accept: application/vnd.github+json" \
+                      "https://api.github.com/repos/$REPO/issues/$PR_NUMBER/comments" \
+                      -d "{\"body\": $(echo "$BODY" | jq -Rs .)}"
+
+                    exit 1
+                  fi

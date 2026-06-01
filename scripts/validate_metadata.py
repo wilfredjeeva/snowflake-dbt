@@ -14,6 +14,9 @@ Rules enforced:
   4. Every model must have 'meta.data_classification' defined               [ALL models]
   5. Every model must have at least one 'dataset:*' tag                     [GOLD & PLATINUM only]
   6. Every model must have a 'DataSet_Tag' (config.tags or config.meta)    [GOLD & PLATINUM only]
+  7. Every model must have 'meta.data_approver' defined (Name + Email)     [GOLD & PLATINUM only]
+     Interim check: validated from YAML meta until DHE-580 delivers the Snowflake
+     governance table (GOVERNANCE.DATA_CLASSIFICATION.DATASET_OWNERSHIP).
 
 Valid domain tags             : domain:airbnb, domain:finance, domain:operations, etc.
 Valid data_classification      : internal, confidential, public, restricted
@@ -119,6 +122,22 @@ def validate_model(model: dict, yaml_file: str) -> list[str]:
                 f"{prefix}: [GOLD/PLATINUM] missing 'DataSet_Tag' "
                 f"— add e.g. 'DataSet_Tag:airbnb' to config.tags "
                 f"OR dataset_tag: airbnb to config.meta"
+            )
+
+        # Rule 7: data_approver required (Gold & Platinum only)
+        # ---------------------------------------------------------------
+        # INTERIM: validated from YAML meta field.
+        # TODO (DHE-580): Replace this check with a live Snowflake query
+        # against GOVERNANCE.DATA_CLASSIFICATION.DATASET_OWNERSHIP once
+        # the Streamlit governance app and table are ready.
+        # ---------------------------------------------------------------
+        data_approver = meta.get("data_approver", "")
+        if not str(data_approver).strip():
+            violations.append(
+                f"{prefix}: [GOLD/PLATINUM] missing 'meta.data_approver' "
+                f"- assign a named Data Approver responsible for validating "
+                f"access, usage, and downstream consumption of this dataset. "
+                f"e.g. data_approver: 'Paul Wilfred (paul.wilfred@westminster.gov.uk)'"
             )
 
     return violations

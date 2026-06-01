@@ -2,19 +2,20 @@ name: Deploy PREPROD (after TEST success)
 
 on:
   workflow_run:
-    workflows: ["Deploy TEST (test branch)"]
+    workflows: [ "Deploy TEST (test branch)" ]
     types:
       - completed
   workflow_dispatch:
 
 permissions:
   contents: read
-  actions: read # needed to download artifacts from previous runs
+  actions: read
 
 jobs:
   preprod_deploy_run:
     runs-on: ubuntu-latest
     environment: preprod
+    timeout-minutes: 45
 
     # Only trigger automatically if the TEST workflow succeeded on the 'test' branch.
     # workflow_dispatch bypasses this condition so manual runs always proceed.
@@ -32,10 +33,18 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dbt
+      - name: Cache pip dependencies
+        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-dbt-${{ hashFiles('**/packages.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-dbt-
+
+      - name: Install dbt and Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install dbt-core==1.9.4 dbt-snowflake==1.9.2
+          pip install dbt-core==1.9.4 dbt-snowflake==1.9.2 pyyaml snowflake-cli
 
       - name: Write Snowflake private key (from GitHub Environment secret)
         run: |
@@ -43,13 +52,12 @@ jobs:
           chmod 600 $HOME/sf_key.p8
 
       # -----------------------------------------------------------------------
-      # GOVERNANCE VALIDATION — runs before dbt build
+      # GOVERNANCE VALIDATION - runs before dbt build.
       # Fails the pipeline (and blocks PROD promotion) if any model
       # is missing required metadata.
       # -----------------------------------------------------------------------
       - name: Validate governance metadata (tags, owner, classification)
         run: |
-          pip install pyyaml --quiet
           python scripts/validate_metadata.py
 
       - name: Install dbt dependencies (packages)
@@ -83,7 +91,7 @@ jobs:
                 schema: {json.dumps(e['SF_SCHEMA'])}
                 private_key_path: "/home/runner/sf_key.p8"
                 private_key_passphrase: {json.dumps(e['SF_PASSPHRASE'])}
-                threads: 4
+                threads: 8
           """
           pathlib.Path("datahub_refinery/profiles.yml").write_text(content)
           print("CI profiles.yml written for preprod")
@@ -91,30 +99,48 @@ jobs:
 
       # -----------------------------------------------------------------------
       # PRE-PROD always runs a FULL build of ALL models.
-      # This is a promotion from TEST — we validate the entire model graph,
+      # This is a promotion from TEST - we validate the entire model graph,
       # not just what changed in the last commit.
+      # dbt build = dbt run + dbt test combined (no separate test step needed).
       # -----------------------------------------------------------------------
       - name: Build all dbt models (FULL build)
+        timeout-minutes: 30
         working-directory: datahub_refinery
         run: |
-          echo "FULL build — all models (PREPROD promotion)"
+          echo "FULL build - all models (PREPROD promotion)"
           dbt build \
             --select "path:models+" \
             --target preprod \
             --no-fail-fast \
+            --full-refresh \
             --profiles-dir .
-        continue-on-error: true
 
-      - name: Run dbt tests (all models)
-        if: always()
-        working-directory: datahub_refinery
+      # -----------------------------------------------------------------------
+      # Register dbt project as Snowflake native object so ADF can orchestrate.
+      # -----------------------------------------------------------------------
+      - name: Deploy dbt project object to Snowflake (PREPROD)
+        env:
+          PRIVATE_KEY_PASSPHRASE: ${{ secrets.SNOWFLAKE_KEY_PASSPHRASE }}
         run: |
-          dbt test \
-            --select "path:models+" \
-            --target preprod \
-            --no-fail-fast \
-            --profiles-dir .
-        continue-on-error: true
+          mkdir -p ~/.snowflake
+          cat > ~/.snowflake/config.toml <<'EOF'
+          default_connection_name = "ci"
+          [connections.ci]
+          account = "${{ secrets.SNOWFLAKE_ACCOUNT }}"
+          user = "${{ secrets.SNOWFLAKE_USER }}"
+          role = "${{ secrets.SNOWFLAKE_ROLE }}"
+          warehouse = "${{ secrets.SNOWFLAKE_WAREHOUSE }}"
+          database = "${{ secrets.SNOWFLAKE_DBT_DATABASE }}"
+          schema = "${{ secrets.SNOWFLAKE_DBT_SCHEMA }}"
+          authenticator = "SNOWFLAKE_JWT"
+          private_key_path = "/home/runner/sf_key.p8"
+          EOF
+          chmod 0600 ~/.snowflake/config.toml
+          snow dbt deploy "PREPROD_DATATRANSFORMATIONS" \
+            --source datahub_refinery \
+            --profiles-dir datahub_refinery \
+            --default-target preprod \
+            --force
 
       - name: Generate dbt test HTML report
         if: always()
@@ -137,4 +163,4 @@ jobs:
             datahub_refinery/target/manifest.json
             datahub_refinery/target/run_results.json
           if-no-files-found: ignore
-          retention-days: 90
+          retention-days: 15

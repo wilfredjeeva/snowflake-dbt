@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - "test"
-      - "feature/DHE-404_testworkflow"
   workflow_dispatch:
 
 permissions:
@@ -64,50 +63,27 @@ jobs:
             echo ">>> Model/YAML only change - running SELECTIVE build"
           fi
 
-      - name: Get last completed run ID (for manifest)
-        id: last_run
+      - name: Restore previous manifest (for selective builds)
+        id: manifest_cache
         if: steps.build_scope.outputs.BUILD_TYPE == 'selective'
-        run: |
-          # Look for most recent completed run (success OR failure) — the manifest
-          # is always uploaded via 'if: always()', so failed runs are valid sources.
-          RUN_ID=$(gh run list \
-            --workflow test-deploy.yml \
-            --limit 10 \
-            --json databaseId,conclusion \
-            --jq '[.[] | select(.conclusion == "success" or .conclusion == "failure")] | .[0].databaseId' \
-            2>/dev/null || echo "")
-          echo "RUN_ID=$RUN_ID" >> $GITHUB_OUTPUT
-          echo "Last completed run ID: $RUN_ID"
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Download previous dbt manifest (for selective builds)
-        if: steps.build_scope.outputs.BUILD_TYPE == 'selective' &&
-          steps.last_run.outputs.RUN_ID != ''
-        run: |
-          mkdir -p previous-manifest
-          echo "Attempting to download manifest from run ${{ steps.last_run.outputs.RUN_ID }}..."
-          if gh run download "${{ steps.last_run.outputs.RUN_ID }}" \
-              --name dbt_artifacts_test \
-              --dir previous-manifest/ 2>/dev/null; then
-            echo "Manifest downloaded successfully"
-          else
-            echo "WARNING: Manifest download failed (artifact may have expired or been deleted)"
-            echo "Pipeline will fall back to a full build"
-          fi
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        uses: actions/cache/restore@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
+        with:
+          path: previous-manifest/manifest.json
+          # key won't match current run (save hasn't happened yet)
+          # restore-keys picks up the most recent previous run's manifest
+          key: dbt-manifest-test-${{ github.run_id }}
+          restore-keys: |
+            dbt-manifest-test-
 
       - name: Fallback check - manifest found?
         id: manifest_check
         if: steps.build_scope.outputs.BUILD_TYPE == 'selective'
         run: |
-          echo "Contents of previous-manifest/:" && find previous-manifest/ -type f 2>/dev/null || echo "(directory empty or missing)"
           if [ -f "previous-manifest/manifest.json" ]; then
-            echo "Manifest found - selective build with state comparison"
+            echo "Manifest found (from cache) - selective build with state comparison"
             echo "USE_STATE=true" >> $GITHUB_OUTPUT
           else
-            echo "No manifest found - will fall back to full build"
+            echo "No manifest in cache - will fall back to full build"
             echo "USE_STATE=false" >> $GITHUB_OUTPUT
           fi
 
@@ -169,7 +145,14 @@ jobs:
             dbt build --select "path:models+" --target test --no-fail-fast --profiles-dir .
           elif [ "${{ steps.manifest_check.outputs.USE_STATE }}" == "true" ]; then
             echo "SELECTIVE build - +state:modified+ (upstream + changed + downstream)"
-            dbt build --select "+state:modified+" --state ../previous-manifest/ --target test --no-fail-fast --profiles-dir .
+            dbt build --select "+state:modified+" --state ../previous-manifest/ --target test --no-fail-fast --profiles-dir . 2>&1 | tee /tmp/selective_build.log
+            DBT_EXIT=${PIPESTATUS[0]}
+            if [ $DBT_EXIT -ne 0 ]; then
+              exit $DBT_EXIT
+            elif grep -q "Nothing to do" /tmp/selective_build.log; then
+              echo "Selective build found nothing to run (stale manifest) - falling back to FULL build"
+              dbt build --select "path:models+" --target test --no-fail-fast --profiles-dir .
+            fi
           else
             echo "No manifest available (expired or first run) - falling back to FULL build"
             dbt build --select "path:models+" --target test --no-fail-fast --profiles-dir .
@@ -187,22 +170,24 @@ jobs:
           path: dbt_test_report.html
           if-no-files-found: warn
 
-      - name: Stage dbt artifacts for upload
+      - name: Save manifest to cache for next selective build
         if: always()
         run: |
-          # Copy to a flat directory so the artifact contains manifest.json at its
-          # root (not datahub_refinery/target/manifest.json). This ensures
-          # 'gh run download --dir previous-manifest/' places the file at
-          # previous-manifest/manifest.json — exactly where the fallback check looks.
-          mkdir -p dbt_artifacts_staging
-          cp datahub_refinery/target/manifest.json dbt_artifacts_staging/ 2>/dev/null || true
-          cp datahub_refinery/target/run_results.json dbt_artifacts_staging/ 2>/dev/null || true
+          mkdir -p previous-manifest
+          cp datahub_refinery/target/manifest.json previous-manifest/ 2>/dev/null || true
+
+      - name: Cache manifest for next selective build
+        if: always()
+        uses: actions/cache/save@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
+        with:
+          path: previous-manifest/manifest.json
+          key: dbt-manifest-test-${{ github.run_id }}
 
       - name: Upload dbt artifacts
         if: always()
         uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
         with:
           name: dbt_artifacts_test
-          path: dbt_artifacts_staging/
+          path: previous-manifest/
           if-no-files-found: ignore
-          retention-days: 90
+          retention-days: 15

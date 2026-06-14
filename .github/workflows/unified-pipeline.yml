@@ -1,0 +1,512 @@
+# CI/CD pipeline: test → preprod (approval gate) → main PR
+# Triggered on push to test or a manual run.
+
+name: dandi-datahub-dbt-to-test-preprod
+
+on:
+  push:
+    branches:
+      - "test"
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: write
+  actions: read
+  pull-requests: write
+
+env:
+  DBT_PROJECT_OBJECT_NAME: datahub_refinery
+
+jobs:
+
+# Stage 1 — Build: compile, governance check, capture the commit SHA.
+  build:
+    name: Build (Compile & Validate)
+    runs-on: ubuntu-latest
+
+    outputs:
+      deploy_sha:   ${{ steps.capture_sha.outputs.sha }}
+      build_type:   ${{ steps.build_scope.outputs.BUILD_TYPE }}
+      dbt_selector: ${{ steps.build_scope.outputs.DBT_SELECTOR }}
+
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Capture commit SHA
+        id: capture_sha
+        run: |
+          SHA=$(git rev-parse HEAD)
+          echo "sha=$SHA" >> $GITHUB_OUTPUT
+          echo "Pinned deploy SHA: $SHA"
+
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.11"
+
+      - name: Install dbt and Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install dbt-core==1.9.4 dbt-snowflake==1.9.2 pyyaml
+
+      # Full build if config/macro/workflow files changed; selective otherwise.
+      - name: Detect build scope (full vs selective)
+        id: build_scope
+        run: |
+          CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || git diff --name-only HEAD)
+          echo "Changed files:"
+          echo "$CHANGED"
+
+          if echo "$CHANGED" | grep -qE \
+            '(dbt_project\.yml|profiles\.yml|packages\.yml|datahub_refinery/macros/|\.github/workflows/)'; then
+            echo "BUILD_TYPE=full"           >> $GITHUB_OUTPUT
+            echo "DBT_SELECTOR=path:models+" >> $GITHUB_OUTPUT
+            echo ">>> CONFIG or MACRO change detected — FULL build scheduled"
+          else
+            echo "BUILD_TYPE=selective"           >> $GITHUB_OUTPUT
+            echo "DBT_SELECTOR=state:modified+"   >> $GITHUB_OUTPUT
+            echo ">>> Model/YAML change only — SELECTIVE build scheduled"
+          fi
+
+      - name: Validate governance metadata (tags, owner, classification)
+        run: |
+          python scripts/validate_metadata.py
+
+# Stage 2 — Deploy TEST: run dbt build on the exact tested commit.
+  deploy_test:
+    name: Deploy TEST
+    runs-on: ubuntu-latest
+    environment: test
+    timeout-minutes: 45
+    needs: build
+
+    outputs:
+      deploy_sha:   ${{ needs.build.outputs.deploy_sha }}
+      build_type:   ${{ needs.build.outputs.build_type }}
+      dbt_selector: ${{ needs.build.outputs.dbt_selector }}
+
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.build.outputs.deploy_sha }}
+          fetch-depth: 0
+
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip dependencies
+        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-dbt-${{ hashFiles('**/packages.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-dbt-
+
+      - name: Install dbt and Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install dbt-core==1.9.4 dbt-snowflake==1.9.2 pyyaml
+
+      - name: Write Snowflake private key (from GitHub Environment secret)
+        run: |
+          printf '%s' "${{ secrets.SNOWFLAKE_PRIVATE_KEY }}" > $HOME/sf_key.p8
+          chmod 600 $HOME/sf_key.p8
+
+      # Tries to restore the manifest from the previous run for selective builds.
+      - name: Restore previous manifest (for selective builds)
+        id: manifest_cache
+        if: needs.build.outputs.build_type == 'selective'
+        uses: actions/cache/restore@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
+        with:
+          path: previous-manifest/manifest.json
+          key: dbt-manifest-test-${{ github.run_id }}
+          restore-keys: |
+            dbt-manifest-test-
+
+      - name: Fallback check - manifest found?
+        id: manifest_check
+        if: needs.build.outputs.build_type == 'selective'
+        run: |
+          if [ -f "previous-manifest/manifest.json" ]; then
+            echo "Manifest found (from cache) - selective build with state comparison"
+            echo "USE_STATE=true" >> $GITHUB_OUTPUT
+          else
+            echo "No manifest in cache - will fall back to full build"
+            echo "USE_STATE=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Validate governance metadata (tags, owner, classification)
+        run: |
+          python scripts/validate_metadata.py
+
+      - name: Install dbt packages
+        run: |
+          cd datahub_refinery
+          dbt deps --target test
+
+      - name: Write CI profiles.yml (test)
+        env:
+          SF_ACCOUNT:    ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SF_USER:       ${{ secrets.SNOWFLAKE_USER }}
+          SF_ROLE:       ${{ secrets.SNOWFLAKE_ROLE }}
+          SF_WAREHOUSE:  ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+          SF_DB:         ${{ secrets.SNOWFLAKE_DB }}
+          SF_SCHEMA:     ${{ secrets.SNOWFLAKE_SCHEMA }}
+          SF_PASSPHRASE: ${{ secrets.SNOWFLAKE_KEY_PASSPHRASE }}
+        run: |
+          python3 - << 'PYEOF'
+          import os, pathlib, json
+          e = os.environ
+          content = f"""datahub_refinery:
+            target: test
+            outputs:
+              test:
+                type: snowflake
+                account: {json.dumps(e['SF_ACCOUNT'])}
+                user: {json.dumps(e['SF_USER'])}
+                role: {json.dumps(e['SF_ROLE'])}
+                warehouse: {json.dumps(e['SF_WAREHOUSE'])}
+                database: {json.dumps(e['SF_DB'])}
+                schema: {json.dumps(e['SF_SCHEMA'])}
+                private_key_path: "/home/runner/sf_key.p8"
+                private_key_passphrase: {json.dumps(e['SF_PASSPHRASE'])}
+                threads: 8
+          """
+          pathlib.Path("datahub_refinery/profiles.yml").write_text(content)
+          print("CI profiles.yml written for test.")
+          PYEOF
+
+      # dbt build runs models AND tests together.
+      # Selective mode builds only changed models + their dependents; falls back to full if no manifest.
+      - name: Build changed dbt models (selective, upstream + changed + downstream)
+        timeout-minutes: 30
+        working-directory: datahub_refinery
+        run: |
+          if [ "${{ needs.build.outputs.build_type }}" == "full" ]; then
+            echo "FULL build - config/macro/workflow change detected"
+            dbt build --select "path:models+" --target test --no-fail-fast --profiles-dir .
+          elif [ "${{ steps.manifest_check.outputs.USE_STATE }}" == "true" ]; then
+            echo "SELECTIVE build - +state:modified+ (upstream + changed + downstream)"
+            dbt build --select "+state:modified+" --state ../previous-manifest/ --target test --no-fail-fast --profiles-dir . 2>&1 | tee /tmp/selective_build.log
+            DBT_EXIT=${PIPESTATUS[0]}
+            if [ $DBT_EXIT -ne 0 ]; then
+              exit $DBT_EXIT
+            elif grep -q "Nothing to do" /tmp/selective_build.log; then
+              echo "Selective build found nothing to run (stale manifest) - falling back to FULL build"
+              dbt build --select "path:models+" --target test --no-fail-fast --profiles-dir .
+            fi
+          else
+            echo "No manifest available (expired or first run) - falling back to FULL build"
+            dbt build --select "path:models+" --target test --no-fail-fast --profiles-dir .
+          fi
+
+      - name: Generate dbt test HTML report
+        if: always()
+        run: python scripts/dbt_report.py
+
+      - name: Upload dbt test report
+        if: always()
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
+        with:
+          name: dbt_test_report_test
+          path: dbt_test_report.html
+          if-no-files-found: warn
+
+      - name: Save manifest to cache for next selective build
+        if: always()
+        run: |
+          mkdir -p previous-manifest
+          cp datahub_refinery/target/manifest.json previous-manifest/ 2>/dev/null || true
+
+      - name: Cache manifest for next selective build
+        if: always()
+        uses: actions/cache/save@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
+        with:
+          path: previous-manifest/manifest.json
+          key: dbt-manifest-test-${{ github.run_id }}
+
+      - name: Upload dbt artifacts
+        if: always()
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
+        with:
+          name: dbt_artifacts_test
+          path: previous-manifest/
+          if-no-files-found: ignore
+          retention-days: 15
+
+# Stage 3 — Deploy PREPROD: waits for manual approval, then deploys the same commit.
+# Set required reviewers under Settings → Environments → preprod.
+  deploy_preprod:
+    name: Deploy PREPROD
+    runs-on: ubuntu-latest
+    environment: preprod
+    timeout-minutes: 45
+    needs: deploy_test
+
+    outputs:
+      deploy_sha:   ${{ needs.deploy_test.outputs.deploy_sha }}
+      build_type:   ${{ needs.deploy_test.outputs.build_type }}
+      dbt_selector: ${{ needs.deploy_test.outputs.dbt_selector }}
+
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          # Checks out the exact commit that passed TEST, after the approver clicks approve.
+          ref: ${{ needs.deploy_test.outputs.deploy_sha }}
+          fetch-depth: 0
+
+      - name: Verify checked-out SHA matches tested commit
+        run: |
+          EXPECTED="${{ needs.deploy_test.outputs.deploy_sha }}"
+          ACTUAL=$(git rev-parse HEAD)
+          echo "Expected SHA: $EXPECTED"
+          echo "Actual SHA:   $ACTUAL"
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "ERROR: SHA mismatch! Aborting to prevent deploying the wrong commit."
+            exit 1
+          fi
+          echo "SHA verified — deploying the correct tested commit."
+
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip dependencies
+        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-dbt-${{ hashFiles('**/packages.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-dbt-
+
+      - name: Install dbt and Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install dbt-core==1.9.4 dbt-snowflake==1.9.2 pyyaml "snowflake-cli==3.13.1"
+
+      - name: Write Snowflake private key
+        run: |
+          printf '%s' "${{ secrets.SNOWFLAKE_PRIVATE_KEY }}" > $HOME/sf_key.p8
+          chmod 600 $HOME/sf_key.p8
+
+      - name: Validate governance metadata (tags, owner, classification)
+        run: python scripts/validate_metadata.py
+
+      - name: Install dbt packages
+        run: |
+          cd datahub_refinery
+          dbt deps --target preprod
+
+      - name: Write CI profiles.yml (preprod)
+        env:
+          SF_ACCOUNT:    ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SF_USER:       ${{ secrets.SNOWFLAKE_USER }}
+          SF_ROLE:       ${{ secrets.SNOWFLAKE_ROLE }}
+          SF_WAREHOUSE:  ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+          SF_DB:         ${{ secrets.SNOWFLAKE_DB }}
+          SF_SCHEMA:     ${{ secrets.SNOWFLAKE_SCHEMA }}
+          SF_PASSPHRASE: ${{ secrets.SNOWFLAKE_KEY_PASSPHRASE }}
+        run: |
+          python3 - << 'PYEOF'
+          import os, pathlib, json
+          e = os.environ
+          content = f"""datahub_refinery:
+            target: preprod
+            outputs:
+              preprod:
+                type: snowflake
+                account: {json.dumps(e['SF_ACCOUNT'])}
+                user: {json.dumps(e['SF_USER'])}
+                role: {json.dumps(e['SF_ROLE'])}
+                warehouse: {json.dumps(e['SF_WAREHOUSE'])}
+                database: {json.dumps(e['SF_DB'])}
+                schema: {json.dumps(e['SF_SCHEMA'])}
+                private_key_path: "/home/runner/sf_key.p8"
+                private_key_passphrase: {json.dumps(e['SF_PASSPHRASE'])}
+                threads: 8
+          """
+          pathlib.Path("datahub_refinery/profiles.yml").write_text(content)
+          print("CI profiles.yml written for preprod.")
+          PYEOF
+
+      # Restore the manifest produced by the TEST stage in this same run.
+      # Using the test run's manifest (keyed by run_id) is intentional:
+      #   - It is always available within the same pipeline run (no expiry risk).
+      #   - A preprod-specific manifest would expire after 7 days and force a
+      #     full build on infrequent deployment schedules (e.g. fortnightly).
+      #   - Preprod builds exactly the same delta as test — which is the goal.
+      - name: Restore TEST manifest for selective build
+        id: manifest_cache
+        if: needs.deploy_test.outputs.build_type == 'selective'
+        uses: actions/cache/restore@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
+        with:
+          path: previous-manifest/manifest.json
+          key: dbt-manifest-test-${{ github.run_id }}
+          restore-keys: |
+            dbt-manifest-test-
+
+      - name: Fallback check - manifest found?
+        id: manifest_check
+        if: needs.deploy_test.outputs.build_type == 'selective'
+        run: |
+          if [ -f "previous-manifest/manifest.json" ]; then
+            echo "Manifest found (from TEST stage) - selective build with state comparison"
+            echo "USE_STATE=true" >> $GITHUB_OUTPUT
+          else
+            echo "No manifest available - will fall back to full build"
+            echo "USE_STATE=false" >> $GITHUB_OUTPUT
+          fi
+
+      # Mirrors the test build exactly: selective when test was selective, full when test was full.
+      - name: Build dbt models (mirrors TEST build mode)
+        timeout-minutes: 30
+        working-directory: datahub_refinery
+        run: |
+          if [ "${{ needs.deploy_test.outputs.build_type }}" == "full" ]; then
+            echo "FULL build - config/macro/workflow change detected (mirrors TEST)"
+            dbt build --select "path:models+" --target preprod --no-fail-fast --profiles-dir .
+          elif [ "${{ steps.manifest_check.outputs.USE_STATE }}" == "true" ]; then
+            echo "SELECTIVE build - +state:modified+ (upstream + changed + downstream, mirrors TEST)"
+            dbt build --select "+state:modified+" --state ../previous-manifest/ --target preprod --no-fail-fast --profiles-dir . 2>&1 | tee /tmp/selective_build.log
+            DBT_EXIT=${PIPESTATUS[0]}
+            if [ $DBT_EXIT -ne 0 ]; then
+              exit $DBT_EXIT
+            elif grep -q "Nothing to do" /tmp/selective_build.log; then
+              echo "Selective build found nothing to run (stale manifest) - falling back to FULL build"
+              dbt build --select "path:models+" --target preprod --no-fail-fast --profiles-dir .
+            fi
+          else
+            echo "No manifest available (expired or first run) - falling back to FULL build"
+            dbt build --select "path:models+" --target preprod --no-fail-fast --profiles-dir .
+          fi
+
+      - name: Generate dbt test HTML report
+        if: always()
+        run: python scripts/dbt_report.py
+
+      - name: Upload dbt test report
+        if: always()
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
+        with:
+          name: dbt_test_report_preprod
+          path: dbt_test_report.html
+          if-no-files-found: warn
+
+      - name: Upload dbt artifacts (manifest + run results)
+        if: always()
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
+        with:
+          name: dbt_artifacts_preprod
+          path: |
+            datahub_refinery/target/manifest.json
+            datahub_refinery/target/run_results.json
+          if-no-files-found: ignore
+          retention-days: 15
+
+      # -----------------------------------------------------------------------
+      # Reports and artifacts captured above. Now clean target/ and logs/ so
+      # the Snowflake CLI only stages project source files (not compiled SQL
+      # artifacts), avoiding the SecurePath "Cannot join path to a file" error.
+      # dbt_packages/ is intentionally retained — it contains dbt_utils and
+      # dbt_expectations macros that the Snowflake object needs at runtime.
+      # -----------------------------------------------------------------------
+      - name: Clean dbt artifacts before Snowflake deploy
+        run: |
+          rm -rf "$GITHUB_WORKSPACE/datahub_refinery/target"
+          rm -rf "$GITHUB_WORKSPACE/datahub_refinery/logs"
+          echo "Cleaned target/ and logs/ — dbt_packages/ retained for deploy"
+
+      - name: Deploy dbt project object to Snowflake (PREPROD)
+        env:
+          PRIVATE_KEY_PASSPHRASE: ${{ secrets.SNOWFLAKE_KEY_PASSPHRASE }}
+        run: |
+          mkdir -p ~/.snowflake
+          cat > ~/.snowflake/config.toml <<'EOF'
+          default_connection_name = "ci"
+          [connections.ci]
+          account = "${{ secrets.SNOWFLAKE_ACCOUNT }}"
+          user = "${{ secrets.SNOWFLAKE_USER }}"
+          role = "${{ secrets.SNOWFLAKE_ROLE }}"
+          warehouse = "${{ secrets.SNOWFLAKE_WAREHOUSE }}"
+          database = "${{ secrets.SNOWFLAKE_DBT_DATABASE }}"
+          schema = "${{ secrets.SNOWFLAKE_DBT_SCHEMA }}"
+          authenticator = "SNOWFLAKE_JWT"
+          private_key_path = "/home/runner/sf_key.p8"
+          EOF
+          chmod 0600 ~/.snowflake/config.toml
+          snow dbt deploy "PREPROD_DATATRANSFORMATIONS" \
+            --source "$GITHUB_WORKSPACE/datahub_refinery" \
+            --profiles-dir "$GITHUB_WORKSPACE/datahub_refinery" \
+            --default-target preprod \
+            --force
+
+# Stage 4 — Promote: opens a PR from test → main once preprod passes.
+# Merge the PR to kick off the prod deploy workflow.
+  promote_tested_commit_to_main:
+    name: Promote Tested Commit to Main
+    runs-on: ubuntu-latest
+    needs: [deploy_test, deploy_preprod]
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Promote tested commit — open PR test → main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEPLOY_SHA: ${{ needs.deploy_preprod.outputs.deploy_sha }}
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+          SHORT_SHA="${DEPLOY_SHA:0:7}"
+          echo "Promoting tested commit $DEPLOY_SHA (short: $SHORT_SHA)"
+
+          git fetch origin main test
+
+          # Confirm the SHA exists before doing anything.
+          git cat-file -e "$DEPLOY_SHA^{commit}"
+          echo "SHA validated: $DEPLOY_SHA exists."
+
+          # Skip if test is already fully merged into main.
+          if git diff --quiet origin/main...origin/test; then
+            echo "Nothing to promote — test is already in main. Skipping PR."
+            exit 0
+          fi
+
+          cat > body.md <<EOF
+          ## 🚀 Automated Promotion: test → main
+
+          All pipeline stages passed — this PR is ready to merge.
+
+          | Stage | Status |
+          |-------|--------|
+          | ✅ Build (compile + governance) | Passed |
+          | ✅ Deploy TEST | Passed |
+          | ✅ Deploy PREPROD (approved) | Passed |
+
+          **Pinned commit SHA:** \`${DEPLOY_SHA}\`
+          **Short SHA:** \`${SHORT_SHA}\`
+          **Workflow:** \`${GITHUB_WORKFLOW}\`
+          **Run:** \`${GITHUB_RUN_ID}\`
+
+          > _Merge this PR to trigger the PROD deploy workflow._
+          EOF
+
+          gh pr create \
+            --base main \
+            --head test \
+            --title "Promote ${SHORT_SHA} to main" \
+            --body-file body.md \
+          || echo "PR may already exist; continuing."

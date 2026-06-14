@@ -1,44 +1,158 @@
-name: Deploy PROD (after test to main PR merge) - Deploy only
+name: Deploy PROD (push to main)
 
 on:
-  pull_request:
-    types:
-      - closed
+  push:
     branches:
       - "main"
   workflow_dispatch:
 
 permissions:
   contents: read
-  pull-requests: write
-
-env:
-  DBT_PROJECT_OBJECT_NAME: DATAHUB_DBT_MODELS
+  actions: read
 
 jobs:
-  prod_deploy_only:
+  prod_deploy_run:
     runs-on: ubuntu-latest
     environment: prod
-    # Only run if PR was merged (not just closed) and source branch is 'test'
-    if: github.event.pull_request.merged == true && github.event.pull_request.head.ref == 'test'
+    timeout-minutes: 45
+
+    # Runs automatically on push to main (i.e. after a test-main PR is reviewed, approved, and merged).
+    # The prod environment gate pauses the job until an approver confirms in GitHub Actions UI.
+    # Also supports manual runs via workflow_dispatch.
+    if: |
+      github.event_name == 'push' ||
+      github.event_name == 'workflow_dispatch'
 
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
         with:
           python-version: "3.11"
 
-      - name: Install Snowflake CLI + dbt
+      - name: Cache pip dependencies
+        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-dbt-${{ hashFiles('**/packages.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-dbt-
+
+      - name: Install dbt and Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install --upgrade snowflake-cli dbt-core dbt-snowflake
+          pip install dbt-core==1.9.4 dbt-snowflake==1.9.2 pyyaml "snowflake-cli==3.13.1"
 
       - name: Write Snowflake private key (from GitHub Environment secret)
         run: |
-          printf '%s' "${{ secrets.SNOWFLAKE_PRIVATE_KEY_B64 }}" | base64 -d > $HOME/sf_key.p8
+          printf '%s' "${{ secrets.SNOWFLAKE_PRIVATE_KEY }}" > $HOME/sf_key.p8
           chmod 600 $HOME/sf_key.p8
 
-      - name: Configure Snowflake CLI connection (ci)
+      # -----------------------------------------------------------------------
+      # GOVERNANCE VALIDATION - runs before dbt build.
+      # Fails the pipeline (and blocks PROD promotion) if any model
+      # is missing required metadata.
+      # -----------------------------------------------------------------------
+      - name: Validate governance metadata (tags, owner, classification)
+        run: |
+          python scripts/validate_metadata.py
+
+      - name: Install dbt dependencies (packages)
+        run: |
+          cd datahub_refinery
+          dbt deps --target prod
+
+      - name: Write CI profiles.yml
+        env:
+          SF_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SF_USER: ${{ secrets.SNOWFLAKE_USER }}
+          SF_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
+          SF_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+          SF_DB: ${{ secrets.SNOWFLAKE_DB }}
+          SF_SCHEMA: ${{ secrets.SNOWFLAKE_SCHEMA }}
+          SF_PASSPHRASE: ${{ secrets.SNOWFLAKE_KEY_PASSPHRASE }}
+        run: |
+          python3 - << 'PYEOF'
+          import os, pathlib, json
+          e = os.environ
+          content = f"""datahub_refinery:
+            target: prod
+            outputs:
+              prod:
+                type: snowflake
+                account: {json.dumps(e['SF_ACCOUNT'])}
+                user: {json.dumps(e['SF_USER'])}
+                role: {json.dumps(e['SF_ROLE'])}
+                warehouse: {json.dumps(e['SF_WAREHOUSE'])}
+                database: {json.dumps(e['SF_DB'])}
+                schema: {json.dumps(e['SF_SCHEMA'])}
+                private_key_path: "/home/runner/sf_key.p8"
+                private_key_passphrase: {json.dumps(e['SF_PASSPHRASE'])}
+                threads: 8
+          """
+          pathlib.Path("datahub_refinery/profiles.yml").write_text(content)
+          print("CI profiles.yml written for prod")
+          PYEOF
+
+      # -----------------------------------------------------------------------
+      # PROD always runs a FULL build of ALL models.
+      # Promotion gate from PREPROD — validates the entire model graph is
+      # healthy before registering in the production Snowflake environment.
+      # dbt build = dbt run + dbt test combined (no separate test step needed).
+      # -----------------------------------------------------------------------
+      - name: Build all dbt models (FULL build)
+        timeout-minutes: 30
+        working-directory: datahub_refinery
+        run: |
+          echo "FULL build - all models (PROD promotion)"
+          dbt build \
+            --select "path:models+" \
+            --target prod \
+            --no-fail-fast \
+            --full-refresh \
+            --profiles-dir .
+
+      - name: Generate dbt test HTML report
+        if: always()
+        run: python scripts/dbt_report.py
+
+      - name: Upload dbt test report
+        if: always()
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
+        with:
+          name: dbt_test_report_prod
+          path: dbt_test_report.html
+          if-no-files-found: warn
+
+      - name: Upload dbt artifacts
+        if: always()
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
+        with:
+          name: dbt_artifacts_prod
+          path: |
+            datahub_refinery/target/manifest.json
+            datahub_refinery/target/run_results.json
+          if-no-files-found: ignore
+          retention-days: 15
+
+      # -----------------------------------------------------------------------
+      # Reports and artifacts captured above. Now clean target/ and logs/ so
+      # the Snowflake CLI only stages project source files (not compiled SQL
+      # artifacts), avoiding the SecurePath "Cannot join path to a file" error.
+      # dbt_packages/ is intentionally retained — it contains dbt_utils and
+      # dbt_expectations macros that the Snowflake object needs at runtime.
+      # -----------------------------------------------------------------------
+      - name: Clean dbt artifacts before Snowflake deploy
+        run: |
+          rm -rf "$GITHUB_WORKSPACE/datahub_refinery/target"
+          rm -rf "$GITHUB_WORKSPACE/datahub_refinery/logs"
+          echo "Cleaned target/ and logs/ — dbt_packages/ retained for deploy"
+
+      - name: Deploy dbt project object to Snowflake (PROD)
+        env:
+          PRIVATE_KEY_PASSPHRASE: ${{ secrets.SNOWFLAKE_KEY_PASSPHRASE }}
         run: |
           mkdir -p ~/.snowflake
           cat > ~/.snowflake/config.toml <<'EOF'
@@ -48,17 +162,14 @@ jobs:
           user = "${{ secrets.SNOWFLAKE_USER }}"
           role = "${{ secrets.SNOWFLAKE_ROLE }}"
           warehouse = "${{ secrets.SNOWFLAKE_WAREHOUSE }}"
-          database = "${{ secrets.SNOWFLAKE_PROJECT_DB }}"
-          schema   = "${{ secrets.SNOWFLAKE_PROJECT_SCHEMA }}"
+          database = "${{ secrets.SNOWFLAKE_DBT_DATABASE }}"
+          schema = "${{ secrets.SNOWFLAKE_DBT_SCHEMA }}"
           authenticator = "SNOWFLAKE_JWT"
           private_key_path = "/home/runner/sf_key.p8"
           EOF
           chmod 0600 ~/.snowflake/config.toml
-
-      - name: Install dbt dependencies (packages)
-        run: |
-          cd datahub_refinery
-          dbt deps --target prod
-      - name: Deploy dbt project object to DBTCENTRAL.PROD_* schema (NO RUN in prod)
-        run: |
-          snow dbt deploy "${{ env.DBT_PROJECT_OBJECT_NAME }}" --source datahub_refinery --profiles-dir datahub_refinery --default-target prod --force
+          snow dbt deploy "PROD_DATATRANSFORMATIONS" \
+            --source "$GITHUB_WORKSPACE/datahub_refinery" \
+            --profiles-dir "$GITHUB_WORKSPACE/datahub_refinery" \
+            --default-target prod \
+            --force

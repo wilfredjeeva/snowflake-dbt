@@ -189,8 +189,8 @@ jobs:
             echo "FULL build - config/macro/workflow change detected"
             dbt build --select "path:models+" --target test --no-fail-fast --profiles-dir .
           elif [ "${{ steps.manifest_check.outputs.USE_STATE }}" == "true" ]; then
-            echo "SELECTIVE build - +state:modified+ (upstream + changed + downstream)"
-            dbt build --select "+state:modified+" --state ../previous-manifest/ --target test --no-fail-fast --profiles-dir . 2>&1 | tee /tmp/selective_build.log
+            echo "SELECTIVE build - state:modified+ (changed + downstream only)"
+            dbt build --select "state:modified+" --state ../previous-manifest/ --target test --no-fail-fast --profiles-dir . 2>&1 | tee /tmp/selective_build.log
             DBT_EXIT=${PIPESTATUS[0]}
             if [ $DBT_EXIT -ne 0 ]; then
               exit $DBT_EXIT
@@ -369,8 +369,8 @@ jobs:
             echo "FULL build - config/macro/workflow change detected (mirrors TEST)"
             dbt build --select "path:models+" --target preprod --no-fail-fast --profiles-dir .
           elif [ "${{ steps.manifest_check.outputs.USE_STATE }}" == "true" ]; then
-            echo "SELECTIVE build - +state:modified+ (upstream + changed + downstream, mirrors TEST)"
-            dbt build --select "+state:modified+" --state ../previous-manifest/ --target preprod --no-fail-fast --profiles-dir . 2>&1 | tee /tmp/selective_build.log
+            echo "SELECTIVE build - state:modified+ (changed + downstream only, mirrors TEST)"
+            dbt build --select "state:modified+" --state ../previous-manifest/ --target preprod --no-fail-fast --profiles-dir . 2>&1 | tee /tmp/selective_build.log
             DBT_EXIT=${PIPESTATUS[0]}
             if [ $DBT_EXIT -ne 0 ]; then
               exit $DBT_EXIT
@@ -404,6 +404,24 @@ jobs:
             datahub_refinery/target/manifest.json
             datahub_refinery/target/run_results.json
           if-no-files-found: ignore
+          retention-days: 15
+
+      # Write build_type to a file artifact so prod-deploy.yml can mirror
+      # the same selective/full decision without re-running the detection logic.
+      - name: Save build type for PROD to consume
+        if: always()
+        run: |
+          mkdir -p /tmp/build-meta
+          echo "${{ needs.deploy_test.outputs.build_type }}" > /tmp/build-meta/build_type.txt
+          echo "Build type saved: ${{ needs.deploy_test.outputs.build_type }}"
+
+      - name: Upload build type artifact
+        if: always()
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
+        with:
+          name: pipeline-build-meta
+          path: /tmp/build-meta/build_type.txt
+          if-no-files-found: warn
           retention-days: 15
 
       # -----------------------------------------------------------------------

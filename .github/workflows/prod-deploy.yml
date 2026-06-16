@@ -51,6 +51,34 @@ jobs:
           chmod 600 $HOME/sf_key.p8
 
       # -----------------------------------------------------------------------
+      # Read the build type (selective / full) that was decided by the unified
+      # pipeline when this commit passed TEST and PREPROD.
+      # We download the artifact uploaded by deploy_preprod, which contains a
+      # single file: build_type.txt with value "selective" or "full".
+      # Falls back to "full" if the artifact is unavailable (manual dispatch,
+      # artifact expired, first-ever run, etc.).
+      # -----------------------------------------------------------------------
+      - name: Download build type from unified pipeline
+        id: download_meta
+        continue-on-error: true
+        uses: actions/download-artifact@cc203385981b70ca67e1cc392babf9cc229d5806 # v4.1.8
+        with:
+          name: pipeline-build-meta
+          path: /tmp/build-meta
+
+      - name: Read build type
+        id: build_scope
+        run: |
+          if [ -f "/tmp/build-meta/build_type.txt" ]; then
+            BUILD_TYPE=$(cat /tmp/build-meta/build_type.txt | tr -d '[:space:]')
+            echo "Build type from unified pipeline: $BUILD_TYPE"
+          else
+            BUILD_TYPE="full"
+            echo "No build type artifact found — defaulting to FULL build"
+          fi
+          echo "BUILD_TYPE=$BUILD_TYPE" >> $GITHUB_OUTPUT
+
+      # -----------------------------------------------------------------------
       # GOVERNANCE VALIDATION - runs before dbt build.
       # Fails the pipeline (and blocks PROD promotion) if any model
       # is missing required metadata.
@@ -97,22 +125,86 @@ jobs:
           PYEOF
 
       # -----------------------------------------------------------------------
-      # PROD always runs a FULL build of ALL models.
-      # Promotion gate from PREPROD — validates the entire model graph is
-      # healthy before registering in the production Snowflake environment.
-      # dbt build = dbt run + dbt test combined (no separate test step needed).
+      # Restore the PROD manifest for selective builds.
+      # A prod-specific manifest is used (not the test/preprod one) because
+      # the prod database state is independent of lower environments.
+      # Falls back to a full build if no manifest is found in cache.
       # -----------------------------------------------------------------------
-      - name: Build all dbt models (FULL build)
+      - name: Restore previous PROD manifest (for selective builds)
+        id: manifest_cache
+        if: steps.build_scope.outputs.BUILD_TYPE == 'selective'
+        uses: actions/cache/restore@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
+        with:
+          path: previous-manifest/manifest.json
+          key: dbt-manifest-prod-${{ github.run_id }}
+          restore-keys: |
+            dbt-manifest-prod-
+
+      - name: Fallback check - manifest found?
+        id: manifest_check
+        if: steps.build_scope.outputs.BUILD_TYPE == 'selective'
+        run: |
+          if [ -f "previous-manifest/manifest.json" ]; then
+            echo "Manifest found (from cache) - selective build with state comparison"
+            echo "USE_STATE=true" >> $GITHUB_OUTPUT
+          else
+            echo "No manifest in cache - will fall back to full build"
+            echo "USE_STATE=false" >> $GITHUB_OUTPUT
+          fi
+
+      # -----------------------------------------------------------------------
+      # PROD build mirrors the TEST/PREPROD build mode exactly:
+      #   selective → build only changed models + downstream (state:modified+)
+      #   full      → build all models (path:models+)
+      # Note: --full-refresh is NOT used in selective mode to preserve
+      # incremental model history. It IS used for full builds.
+      # -----------------------------------------------------------------------
+      - name: Build dbt models (mirrors TEST/PREPROD build mode)
         timeout-minutes: 30
         working-directory: datahub_refinery
         run: |
-          echo "FULL build - all models (PROD promotion)"
-          dbt build \
-            --select "path:models+" \
-            --target prod \
-            --no-fail-fast \
-            --full-refresh \
-            --profiles-dir .
+          BUILD_TYPE="${{ steps.build_scope.outputs.BUILD_TYPE }}"
+          USE_STATE="${{ steps.manifest_check.outputs.USE_STATE }}"
+
+          if [ "$BUILD_TYPE" == "full" ]; then
+            echo "FULL build - all models (config/macro/workflow change, or fallback)"
+            dbt build \
+              --select "path:models+" \
+              --target prod \
+              --no-fail-fast \
+              --full-refresh \
+              --profiles-dir .
+
+          elif [ "$USE_STATE" == "true" ]; then
+            echo "SELECTIVE build - state:modified+ (changed + downstream only)"
+            dbt build \
+              --select "state:modified+" \
+              --state ../previous-manifest/ \
+              --target prod \
+              --no-fail-fast \
+              --profiles-dir . 2>&1 | tee /tmp/selective_build.log
+            DBT_EXIT=${PIPESTATUS[0]}
+            if [ $DBT_EXIT -ne 0 ]; then
+              exit $DBT_EXIT
+            elif grep -q "Nothing to do" /tmp/selective_build.log; then
+              echo "Selective build found nothing to run (stale manifest) - falling back to FULL build"
+              dbt build \
+                --select "path:models+" \
+                --target prod \
+                --no-fail-fast \
+                --full-refresh \
+                --profiles-dir .
+            fi
+
+          else
+            echo "Selective requested but no manifest available - falling back to FULL build"
+            dbt build \
+              --select "path:models+" \
+              --target prod \
+              --no-fail-fast \
+              --full-refresh \
+              --profiles-dir .
+          fi
 
       - name: Generate dbt test HTML report
         if: always()
@@ -125,6 +217,19 @@ jobs:
           name: dbt_test_report_prod
           path: dbt_test_report.html
           if-no-files-found: warn
+
+      - name: Save manifest to cache for next selective build
+        if: always()
+        run: |
+          mkdir -p previous-manifest
+          cp datahub_refinery/target/manifest.json previous-manifest/ 2>/dev/null || true
+
+      - name: Cache PROD manifest for next selective build
+        if: always()
+        uses: actions/cache/save@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
+        with:
+          path: previous-manifest/manifest.json
+          key: dbt-manifest-prod-${{ github.run_id }}
 
       - name: Upload dbt artifacts
         if: always()

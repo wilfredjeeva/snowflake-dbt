@@ -1,7 +1,7 @@
-# CI/CD pipeline: test → preprod (approval gate) → main PR
+﻿# CI/CD pipeline: test -> preprod (approval gate) -> main PR
 # Triggered on push to test or a manual run.
 
-name: dandi-datahub-dbt-to-test-preprod
+name: deploy-to-test-preprod
 
 on:
   push:
@@ -20,7 +20,7 @@ env:
 
 jobs:
 
-# Stage 1 — Build: compile, governance check, capture the commit SHA.
+# Stage 1 - Build: compile, governance check, capture the commit SHA.
   build:
     name: Build (Compile & Validate)
     runs-on: ubuntu-latest
@@ -63,18 +63,18 @@ jobs:
             '(dbt_project\.yml|profiles\.yml|packages\.yml|datahub_refinery/macros/|\.github/workflows/)'; then
             echo "BUILD_TYPE=full"           >> $GITHUB_OUTPUT
             echo "DBT_SELECTOR=path:models+" >> $GITHUB_OUTPUT
-            echo ">>> CONFIG or MACRO change detected — FULL build scheduled"
+            echo ">>> CONFIG or MACRO change detected - FULL build scheduled"
           else
             echo "BUILD_TYPE=selective"           >> $GITHUB_OUTPUT
             echo "DBT_SELECTOR=state:modified+"   >> $GITHUB_OUTPUT
-            echo ">>> Model/YAML change only — SELECTIVE build scheduled"
+            echo ">>> Model/YAML change only - SELECTIVE build scheduled"
           fi
 
       - name: Validate governance metadata (tags, owner, classification)
         run: |
           python scripts/validate_metadata.py
 
-# Stage 2 — Deploy TEST: run dbt build on the exact tested commit.
+# Stage 2 - Deploy TEST: run dbt build on the exact tested commit.
   deploy_test:
     name: Deploy TEST
     runs-on: ubuntu-latest
@@ -237,8 +237,8 @@ jobs:
           if-no-files-found: ignore
           retention-days: 15
 
-# Stage 3 — Deploy PREPROD: waits for manual approval, then deploys the same commit.
-# Set required reviewers under Settings → Environments → preprod.
+# Stage 3 - Deploy PREPROD: waits for manual approval, then deploys the same commit.
+# Set required reviewers under Settings -> Environments -> preprod.
   deploy_preprod:
     name: Deploy PREPROD
     runs-on: ubuntu-latest
@@ -268,7 +268,7 @@ jobs:
             echo "ERROR: SHA mismatch! Aborting to prevent deploying the wrong commit."
             exit 1
           fi
-          echo "SHA verified — deploying the correct tested commit."
+          echo "SHA verified - deploying the correct tested commit."
 
       - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
         with:
@@ -337,7 +337,7 @@ jobs:
       #   - It is always available within the same pipeline run (no expiry risk).
       #   - A preprod-specific manifest would expire after 7 days and force a
       #     full build on infrequent deployment schedules (e.g. fortnightly).
-      #   - Preprod builds exactly the same delta as test — which is the goal.
+      #   - Preprod builds exactly the same delta as test - which is the goal.
       - name: Restore TEST manifest for selective build
         id: manifest_cache
         if: needs.deploy_test.outputs.build_type == 'selective'
@@ -428,14 +428,14 @@ jobs:
       # Reports and artifacts captured above. Now clean target/ and logs/ so
       # the Snowflake CLI only stages project source files (not compiled SQL
       # artifacts), avoiding the SecurePath "Cannot join path to a file" error.
-      # dbt_packages/ is intentionally retained — it contains dbt_utils and
+      # dbt_packages/ is intentionally retained - it contains dbt_utils and
       # dbt_expectations macros that the Snowflake object needs at runtime.
       # -----------------------------------------------------------------------
       - name: Clean dbt artifacts before Snowflake deploy
         run: |
           rm -rf "$GITHUB_WORKSPACE/datahub_refinery/target"
           rm -rf "$GITHUB_WORKSPACE/datahub_refinery/logs"
-          echo "Cleaned target/ and logs/ — dbt_packages/ retained for deploy"
+          echo "Cleaned target/ and logs/ - dbt_packages/ retained for deploy"
 
       - name: Deploy dbt project object to Snowflake (PREPROD)
         env:
@@ -461,7 +461,7 @@ jobs:
             --default-target preprod \
             --force
 
-# Stage 4 — Promote: opens a PR from test → main once preprod passes.
+# Stage 4 - Promote: opens a PR from test -> main once preprod passes.
 # Merge the PR to kick off the prod deploy workflow.
   promote_tested_commit_to_main:
     name: Promote Tested Commit to Main
@@ -477,7 +477,7 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Promote tested commit — open PR test → main
+      - name: Promote tested commit - open PR test -> main
         env:
           GH_TOKEN: ${{ github.token }}
           DEPLOY_SHA: ${{ needs.deploy_preprod.outputs.deploy_sha }}
@@ -499,14 +499,14 @@ jobs:
 
           # Skip if test is already fully merged into main.
           if git diff --quiet origin/main...origin/test; then
-            echo "Nothing to promote — test is already in main. Skipping PR."
+            echo "Nothing to promote - test is already in main. Skipping PR."
             exit 0
           fi
 
           cat > body.md <<EOF
-          ## 🚀 Automated Promotion: test → main
+          ## 🚀 Automated Promotion: test -> main
 
-          All pipeline stages passed — this PR is ready to merge.
+          All pipeline stages passed - this PR is ready to merge.
 
           | Stage | Status |
           |-------|--------|

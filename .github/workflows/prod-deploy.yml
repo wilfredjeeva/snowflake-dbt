@@ -74,7 +74,7 @@ jobs:
             echo "Build type from unified pipeline: $BUILD_TYPE"
           else
             BUILD_TYPE="full"
-            echo "No build type artifact found — defaulting to FULL build"
+            echo "No build type artifact found - defaulting to FULL build"
           fi
           echo "BUILD_TYPE=$BUILD_TYPE" >> $GITHUB_OUTPUT
 
@@ -246,14 +246,14 @@ jobs:
       # Reports and artifacts captured above. Now clean target/ and logs/ so
       # the Snowflake CLI only stages project source files (not compiled SQL
       # artifacts), avoiding the SecurePath "Cannot join path to a file" error.
-      # dbt_packages/ is intentionally retained — it contains dbt_utils and
+      # dbt_packages/ is intentionally retained - it contains dbt_utils and
       # dbt_expectations macros that the Snowflake object needs at runtime.
       # -----------------------------------------------------------------------
       - name: Clean dbt artifacts before Snowflake deploy
         run: |
           rm -rf "$GITHUB_WORKSPACE/datahub_refinery/target"
           rm -rf "$GITHUB_WORKSPACE/datahub_refinery/logs"
-          echo "Cleaned target/ and logs/ — dbt_packages/ retained for deploy"
+          echo "Cleaned target/ and logs/ - dbt_packages/ retained for deploy"
 
       - name: Deploy dbt project object to Snowflake (PROD)
         env:

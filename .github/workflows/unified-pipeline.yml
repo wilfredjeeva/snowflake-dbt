@@ -1,4 +1,4 @@
-﻿# CI/CD pipeline: test -> preprod (approval gate) -> main PR
+# CI/CD pipeline: test -> preprod (approval gate) -> main PR
 # Triggered on push to test or a manual run.
 
 name: deploy-to-test-preprod
@@ -72,7 +72,19 @@ jobs:
 
       - name: Validate governance metadata (tags, owner, classification)
         run: |
+          pip install pyyaml --quiet
           python scripts/validate_metadata.py
+
+      - name: Install dbt packages
+        run: |
+          cd datahub_refinery
+          dbt deps --target test
+
+      - name: dbt parse (compile / syntax check)
+        working-directory: datahub_refinery
+        run: |
+          dbt parse --target test --profiles-dir .
+          echo "dbt compile passed - project is syntactically valid."
 
 # Stage 2 - Deploy TEST: run dbt build on the exact tested commit.
   deploy_test:

@@ -173,7 +173,7 @@ jobs:
             echo "FULL build - all models (config/macro/workflow change, or fallback)"
             dbt build \
               --select "path:models+" \
-              --exclude "gold_dbo_DimAges gold_dbo_DimTimeOfDay" \
+              --exclude "gold_dbo_DimAges gold_dbo_DimTimeOfDay gold_dbo_DimDaysOfWeek" \
               --target prod \
               --no-fail-fast \
               --full-refresh \
@@ -183,7 +183,7 @@ jobs:
             echo "SELECTIVE build - state:modified+ (changed + downstream only)"
             dbt build \
               --select "state:modified+" \
-              --exclude "gold_dbo_DimAges gold_dbo_DimTimeOfDay" \
+              --exclude "gold_dbo_DimAges gold_dbo_DimTimeOfDay gold_dbo_DimDaysOfWeek" \
               --state ../previous-manifest/ \
               --target prod \
               --no-fail-fast \
@@ -195,7 +195,7 @@ jobs:
               echo "Selective build found nothing to run (stale manifest) - falling back to FULL build"
               dbt build \
                 --select "path:models+" \
-                --exclude "gold_dbo_DimAges gold_dbo_DimTimeOfDay" \
+                --exclude "gold_dbo_DimAges gold_dbo_DimTimeOfDay gold_dbo_DimDaysOfWeek" \
                 --target prod \
                 --no-fail-fast \
                 --full-refresh \
@@ -206,7 +206,7 @@ jobs:
             echo "Selective requested but no manifest available - falling back to FULL build"
             dbt build \
               --select "path:models+" \
-              --exclude "gold_dbo_DimAges gold_dbo_DimTimeOfDay" \
+              --exclude "gold_dbo_DimAges gold_dbo_DimTimeOfDay gold_dbo_DimDaysOfWeek" \
               --target prod \
               --no-fail-fast \
               --full-refresh \

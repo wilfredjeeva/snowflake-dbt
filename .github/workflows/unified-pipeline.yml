@@ -193,7 +193,7 @@ jobs:
 
       # dbt build runs models AND tests together.
       # Selective mode builds only changed models + their dependents; falls back to full if no manifest.
-      - name: Build changed dbt models (selective, upstream + changed + downstream)
+      - name: Build changed dbt models (selective: changed + downstream only)
         timeout-minutes: 30
         working-directory: datahub_refinery
         run: |

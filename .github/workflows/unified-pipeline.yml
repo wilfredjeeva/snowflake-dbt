@@ -195,7 +195,7 @@ jobs:
       # Selective mode builds only changed models + their dependents; falls back to full if no manifest.
       # TODO: Remove --exclude gold_dbo_DimAges once fixed by UK team (Emma).
       #       The AGEKEY column is missing in the upstream source - tracked separately.
-      - name: Build changed dbt models (selective: changed + downstream only)
+      - name: Build changed dbt models (selective - changed + downstream only)
         timeout-minutes: 30
         working-directory: datahub_refinery
         run: |

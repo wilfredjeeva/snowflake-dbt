@@ -158,6 +158,8 @@ jobs:
       #   full      → build all models (path:models+)
       # Note: --full-refresh is NOT used in selective mode to preserve
       # incremental model history. It IS used for full builds.
+      # TODO: Remove --exclude gold_dbo_DimAges once fixed by UK team (Emma).
+      #       The AGEKEY column is missing in the upstream source - tracked separately.
       # -----------------------------------------------------------------------
       - name: Build dbt models (mirrors TEST/PREPROD build mode)
         timeout-minutes: 30
@@ -170,6 +172,7 @@ jobs:
             echo "FULL build - all models (config/macro/workflow change, or fallback)"
             dbt build \
               --select "path:models+" \
+              --exclude "gold_dbo_DimAges" \
               --target prod \
               --no-fail-fast \
               --full-refresh \
@@ -179,6 +182,7 @@ jobs:
             echo "SELECTIVE build - state:modified+ (changed + downstream only)"
             dbt build \
               --select "state:modified+" \
+              --exclude "gold_dbo_DimAges" \
               --state ../previous-manifest/ \
               --target prod \
               --no-fail-fast \
@@ -190,6 +194,7 @@ jobs:
               echo "Selective build found nothing to run (stale manifest) - falling back to FULL build"
               dbt build \
                 --select "path:models+" \
+                --exclude "gold_dbo_DimAges" \
                 --target prod \
                 --no-fail-fast \
                 --full-refresh \
@@ -200,6 +205,7 @@ jobs:
             echo "Selective requested but no manifest available - falling back to FULL build"
             dbt build \
               --select "path:models+" \
+              --exclude "gold_dbo_DimAges" \
               --target prod \
               --no-fail-fast \
               --full-refresh \

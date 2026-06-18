@@ -373,26 +373,28 @@ jobs:
           fi
 
       # Mirrors the test build exactly: selective when test was selective, full when test was full.
+      # TODO: Remove the --exclude below once gold_dbo_DimAges is fixed by the UK team (Emma).
+      #       AGEKEY column is missing in the upstream source - tracked separately.
       - name: Build dbt models (mirrors TEST build mode)
         timeout-minutes: 30
         working-directory: datahub_refinery
         run: |
           if [ "${{ needs.deploy_test.outputs.build_type }}" == "full" ]; then
             echo "FULL build - config/macro/workflow change detected (mirrors TEST)"
-            dbt build --select "path:models+" --target preprod --no-fail-fast --profiles-dir .
+            dbt build --select "path:models+" --exclude "gold_dbo_DimAges" --target preprod --no-fail-fast --profiles-dir .
           elif [ "${{ steps.manifest_check.outputs.USE_STATE }}" == "true" ]; then
             echo "SELECTIVE build - state:modified+ (changed + downstream only, mirrors TEST)"
-            dbt build --select "state:modified+" --state ../previous-manifest/ --target preprod --no-fail-fast --profiles-dir . 2>&1 | tee /tmp/selective_build.log
+            dbt build --select "state:modified+" --exclude "gold_dbo_DimAges" --state ../previous-manifest/ --target preprod --no-fail-fast --profiles-dir . 2>&1 | tee /tmp/selective_build.log
             DBT_EXIT=${PIPESTATUS[0]}
             if [ $DBT_EXIT -ne 0 ]; then
               exit $DBT_EXIT
             elif grep -q "Nothing to do" /tmp/selective_build.log; then
               echo "Selective build found nothing to run (stale manifest) - falling back to FULL build"
-              dbt build --select "path:models+" --target preprod --no-fail-fast --profiles-dir .
+              dbt build --select "path:models+" --exclude "gold_dbo_DimAges" --target preprod --no-fail-fast --profiles-dir .
             fi
           else
             echo "No manifest available (expired or first run) - falling back to FULL build"
-            dbt build --select "path:models+" --target preprod --no-fail-fast --profiles-dir .
+            dbt build --select "path:models+" --exclude "gold_dbo_DimAges" --target preprod --no-fail-fast --profiles-dir .
           fi
 
       - name: Generate dbt test HTML report

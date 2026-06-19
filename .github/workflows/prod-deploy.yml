@@ -158,9 +158,11 @@ jobs:
       #   full      → build all models (path:models+)
       # Note: --full-refresh is NOT used in selective mode to preserve
       # incremental model history. It IS used for full builds.
-      # TODO: Remove --exclude below once fixed by the UK team:
-      #       - gold_dbo_DimAges: AGEKEY column missing in upstream source (Emma)
-      #       - gold_dbo_DimTimeOfDay: broken in upstream, fix pending (UK team)
+      # TODO: Remove --exclude below once fixed by the UK team (target: next tranche):
+      #       UDF issue (UDF_GET_TIME_OF_DAY_KEY missing in PREPROD):
+      #         - gold_dbo_DimAges, gold_dbo_DimTimeOfDay, gold_dbo_DimDaysOfWeek, gold_dbo_DimPeriods
+      #       Governance tag issue (SENSITIVEDATASET_TAG, SOURCESYSTEM_TAG, DATASET_TAG missing):
+      #         - platinum_dbo_DaysOfWeek, platinum_dbo_TimeOfDay, platinum_dbo_Periods
       # -----------------------------------------------------------------------
       - name: Build dbt models (mirrors TEST/PREPROD build mode)
         timeout-minutes: 30
@@ -173,7 +175,7 @@ jobs:
             echo "FULL build - all models (config/macro/workflow change, or fallback)"
             dbt build \
               --select "path:models+" \
-              --exclude "gold_dbo_DimAges gold_dbo_DimTimeOfDay gold_dbo_DimDaysOfWeek" \
+              --exclude "gold_dbo_DimAges gold_dbo_DimTimeOfDay gold_dbo_DimDaysOfWeek gold_dbo_DimPeriods platinum_dbo_DaysOfWeek platinum_dbo_TimeOfDay platinum_dbo_Periods" \
               --target prod \
               --no-fail-fast \
               --full-refresh \
@@ -183,7 +185,7 @@ jobs:
             echo "SELECTIVE build - state:modified+ (changed + downstream only)"
             dbt build \
               --select "state:modified+" \
-              --exclude "gold_dbo_DimAges gold_dbo_DimTimeOfDay gold_dbo_DimDaysOfWeek" \
+              --exclude "gold_dbo_DimAges gold_dbo_DimTimeOfDay gold_dbo_DimDaysOfWeek gold_dbo_DimPeriods platinum_dbo_DaysOfWeek platinum_dbo_TimeOfDay platinum_dbo_Periods" \
               --state ../previous-manifest/ \
               --target prod \
               --no-fail-fast \
@@ -195,7 +197,7 @@ jobs:
               echo "Selective build found nothing to run (stale manifest) - falling back to FULL build"
               dbt build \
                 --select "path:models+" \
-                --exclude "gold_dbo_DimAges gold_dbo_DimTimeOfDay gold_dbo_DimDaysOfWeek" \
+                --exclude "gold_dbo_DimAges gold_dbo_DimTimeOfDay gold_dbo_DimDaysOfWeek gold_dbo_DimPeriods platinum_dbo_DaysOfWeek platinum_dbo_TimeOfDay platinum_dbo_Periods" \
                 --target prod \
                 --no-fail-fast \
                 --full-refresh \
@@ -206,7 +208,7 @@ jobs:
             echo "Selective requested but no manifest available - falling back to FULL build"
             dbt build \
               --select "path:models+" \
-              --exclude "gold_dbo_DimAges gold_dbo_DimTimeOfDay gold_dbo_DimDaysOfWeek" \
+              --exclude "gold_dbo_DimAges gold_dbo_DimTimeOfDay gold_dbo_DimDaysOfWeek gold_dbo_DimPeriods platinum_dbo_DaysOfWeek platinum_dbo_TimeOfDay platinum_dbo_Periods" \
               --target prod \
               --no-fail-fast \
               --full-refresh \

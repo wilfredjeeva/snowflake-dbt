@@ -193,29 +193,31 @@ jobs:
 
       # dbt build runs models AND tests together.
       # Selective mode builds only changed models + their dependents; falls back to full if no manifest.
-      # TODO: Remove --exclude below once fixed by the UK team:
-      #       - gold_dbo_DimAges: AGEKEY column missing in upstream source (Emma)
-      #       - gold_dbo_DimTimeOfDay: broken in upstream, fix pending (UK team)
+      # TODO: Remove --exclude below once fixed by the UK team (target: next tranche):
+      #       UDF issue (UDF_GET_TIME_OF_DAY_KEY missing in PREPROD):
+      #         - gold_dbo_DimAges, gold_dbo_DimTimeOfDay, gold_dbo_DimDaysOfWeek, gold_dbo_DimPeriods
+      #       Governance tag issue (SENSITIVEDATASET_TAG, SOURCESYSTEM_TAG, DATASET_TAG missing):
+      #         - platinum_dbo_DaysOfWeek, platinum_dbo_TimeOfDay, platinum_dbo_Periods
       - name: Build changed dbt models (selective - changed + downstream only)
         timeout-minutes: 30
         working-directory: datahub_refinery
         run: |
           if [ "${{ needs.build.outputs.build_type }}" == "full" ]; then
             echo "FULL build - config/macro/workflow change detected"
-            dbt build --select "path:models+" --exclude "gold_dbo_DimAges gold_dbo_DimTimeOfDay gold_dbo_DimDaysOfWeek" --target test --no-fail-fast --profiles-dir .
+            dbt build --select "path:models+" --exclude "gold_dbo_DimAges gold_dbo_DimTimeOfDay gold_dbo_DimDaysOfWeek gold_dbo_DimPeriods platinum_dbo_DaysOfWeek platinum_dbo_TimeOfDay platinum_dbo_Periods" --target test --no-fail-fast --profiles-dir .
           elif [ "${{ steps.manifest_check.outputs.USE_STATE }}" == "true" ]; then
             echo "SELECTIVE build - state:modified+ (changed + downstream only)"
-            dbt build --select "state:modified+" --exclude "gold_dbo_DimAges gold_dbo_DimTimeOfDay gold_dbo_DimDaysOfWeek" --state ../previous-manifest/ --target test --no-fail-fast --profiles-dir . 2>&1 | tee /tmp/selective_build.log
+            dbt build --select "state:modified+" --exclude "gold_dbo_DimAges gold_dbo_DimTimeOfDay gold_dbo_DimDaysOfWeek gold_dbo_DimPeriods platinum_dbo_DaysOfWeek platinum_dbo_TimeOfDay platinum_dbo_Periods" --state ../previous-manifest/ --target test --no-fail-fast --profiles-dir . 2>&1 | tee /tmp/selective_build.log
             DBT_EXIT=${PIPESTATUS[0]}
             if [ $DBT_EXIT -ne 0 ]; then
               exit $DBT_EXIT
             elif grep -q "Nothing to do" /tmp/selective_build.log; then
               echo "Selective build found nothing to run (stale manifest) - falling back to FULL build"
-              dbt build --select "path:models+" --exclude "gold_dbo_DimAges gold_dbo_DimTimeOfDay gold_dbo_DimDaysOfWeek" --target test --no-fail-fast --profiles-dir .
+              dbt build --select "path:models+" --exclude "gold_dbo_DimAges gold_dbo_DimTimeOfDay gold_dbo_DimDaysOfWeek gold_dbo_DimPeriods platinum_dbo_DaysOfWeek platinum_dbo_TimeOfDay platinum_dbo_Periods" --target test --no-fail-fast --profiles-dir .
             fi
           else
             echo "No manifest available (expired or first run) - falling back to FULL build"
-            dbt build --select "path:models+" --exclude "gold_dbo_DimAges gold_dbo_DimTimeOfDay gold_dbo_DimDaysOfWeek" --target test --no-fail-fast --profiles-dir .
+            dbt build --select "path:models+" --exclude "gold_dbo_DimAges gold_dbo_DimTimeOfDay gold_dbo_DimDaysOfWeek gold_dbo_DimPeriods platinum_dbo_DaysOfWeek platinum_dbo_TimeOfDay platinum_dbo_Periods" --target test --no-fail-fast --profiles-dir .
           fi
 
       - name: Generate dbt test HTML report
@@ -377,28 +379,30 @@ jobs:
 
       # Mirrors the test build exactly: selective when test was selective, full when test was full.
       # TODO: Remove --exclude below once fixed by the UK team:
-      #       - gold_dbo_DimAges: AGEKEY column missing in upstream source (Emma)
-      #       - gold_dbo_DimTimeOfDay: broken in upstream, fix pending (UK team)
+      #       UDF issue (UDF_GET_TIME_OF_DAY_KEY missing in PREPROD):
+      #         - gold_dbo_DimAges, gold_dbo_DimTimeOfDay, gold_dbo_DimDaysOfWeek, gold_dbo_DimPeriods
+      #       Governance tag issue (SENSITIVEDATASET_TAG, SOURCESYSTEM_TAG, DATASET_TAG missing):
+      #         - platinum_dbo_DaysOfWeek, platinum_dbo_TimeOfDay, platinum_dbo_Periods
       - name: Build dbt models (mirrors TEST build mode)
         timeout-minutes: 30
         working-directory: datahub_refinery
         run: |
           if [ "${{ needs.deploy_test.outputs.build_type }}" == "full" ]; then
             echo "FULL build - config/macro/workflow change detected (mirrors TEST)"
-            dbt build --select "path:models+" --exclude "gold_dbo_DimAges gold_dbo_DimTimeOfDay gold_dbo_DimDaysOfWeek" --target preprod --no-fail-fast --profiles-dir .
+            dbt build --select "path:models+" --exclude "gold_dbo_DimAges gold_dbo_DimTimeOfDay gold_dbo_DimDaysOfWeek gold_dbo_DimPeriods platinum_dbo_DaysOfWeek platinum_dbo_TimeOfDay platinum_dbo_Periods" --target preprod --no-fail-fast --profiles-dir .
           elif [ "${{ steps.manifest_check.outputs.USE_STATE }}" == "true" ]; then
             echo "SELECTIVE build - state:modified+ (changed + downstream only, mirrors TEST)"
-            dbt build --select "state:modified+" --exclude "gold_dbo_DimAges gold_dbo_DimTimeOfDay gold_dbo_DimDaysOfWeek" --state ../previous-manifest/ --target preprod --no-fail-fast --profiles-dir . 2>&1 | tee /tmp/selective_build.log
+            dbt build --select "state:modified+" --exclude "gold_dbo_DimAges gold_dbo_DimTimeOfDay gold_dbo_DimDaysOfWeek gold_dbo_DimPeriods platinum_dbo_DaysOfWeek platinum_dbo_TimeOfDay platinum_dbo_Periods" --state ../previous-manifest/ --target preprod --no-fail-fast --profiles-dir . 2>&1 | tee /tmp/selective_build.log
             DBT_EXIT=${PIPESTATUS[0]}
             if [ $DBT_EXIT -ne 0 ]; then
               exit $DBT_EXIT
             elif grep -q "Nothing to do" /tmp/selective_build.log; then
               echo "Selective build found nothing to run (stale manifest) - falling back to FULL build"
-              dbt build --select "path:models+" --exclude "gold_dbo_DimAges gold_dbo_DimTimeOfDay gold_dbo_DimDaysOfWeek" --target preprod --no-fail-fast --profiles-dir .
+              dbt build --select "path:models+" --exclude "gold_dbo_DimAges gold_dbo_DimTimeOfDay gold_dbo_DimDaysOfWeek gold_dbo_DimPeriods platinum_dbo_DaysOfWeek platinum_dbo_TimeOfDay platinum_dbo_Periods" --target preprod --no-fail-fast --profiles-dir .
             fi
           else
             echo "No manifest available (expired or first run) - falling back to FULL build"
-            dbt build --select "path:models+" --exclude "gold_dbo_DimAges gold_dbo_DimTimeOfDay gold_dbo_DimDaysOfWeek" --target preprod --no-fail-fast --profiles-dir .
+            dbt build --select "path:models+" --exclude "gold_dbo_DimAges gold_dbo_DimTimeOfDay gold_dbo_DimDaysOfWeek gold_dbo_DimPeriods platinum_dbo_DaysOfWeek platinum_dbo_TimeOfDay platinum_dbo_Periods" --target preprod --no-fail-fast --profiles-dir .
           fi
 
       - name: Generate dbt test HTML report

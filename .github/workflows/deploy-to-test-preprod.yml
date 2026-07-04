@@ -1,7 +1,7 @@
 # CI/CD pipeline: test -> preprod (approval gate) -> main PR
 # Triggered on push to test or a manual run.
 
-name: deploy-to-test-preprod
+name: dandi-datahub-dbt-to-test-preprod
 
 on:
   push:
@@ -193,31 +193,26 @@ jobs:
 
       # dbt build runs models AND tests together.
       # Selective mode builds only changed models + their dependents; falls back to full if no manifest.
-      # TODO: Remove --exclude below once fixed by the UK team (target: next tranche):
-      #       UDF issue (UDF_GET_TIME_OF_DAY_KEY missing in PREPROD):
-      #         - gold_dbo_DimAges, gold_dbo_DimTimeOfDay, gold_dbo_DimDaysOfWeek, gold_dbo_DimPeriods
-      #       Governance tag issue (SENSITIVEDATASET_TAG, SOURCESYSTEM_TAG, DATASET_TAG missing):
-      #         - platinum_dbo_DaysOfWeek, platinum_dbo_TimeOfDay, platinum_dbo_Periods
       - name: Build changed dbt models (selective - changed + downstream only)
         timeout-minutes: 30
         working-directory: datahub_refinery
         run: |
           if [ "${{ needs.build.outputs.build_type }}" == "full" ]; then
             echo "FULL build - config/macro/workflow change detected"
-            dbt build --select "path:models+" --exclude "gold_dbo_DimAges gold_dbo_DimTimeOfDay gold_dbo_DimDaysOfWeek gold_dbo_DimPeriods platinum_dbo_DaysOfWeek platinum_dbo_TimeOfDay platinum_dbo_Periods" --target test --no-fail-fast --profiles-dir .
+            dbt build --select "path:models+" --target test --no-fail-fast --profiles-dir .
           elif [ "${{ steps.manifest_check.outputs.USE_STATE }}" == "true" ]; then
             echo "SELECTIVE build - state:modified+ (changed + downstream only)"
-            dbt build --select "state:modified+" --exclude "gold_dbo_DimAges gold_dbo_DimTimeOfDay gold_dbo_DimDaysOfWeek gold_dbo_DimPeriods platinum_dbo_DaysOfWeek platinum_dbo_TimeOfDay platinum_dbo_Periods" --state ../previous-manifest/ --target test --no-fail-fast --profiles-dir . 2>&1 | tee /tmp/selective_build.log
+            dbt build --select "state:modified+" --state ../previous-manifest/ --target test --no-fail-fast --profiles-dir . 2>&1 | tee /tmp/selective_build.log
             DBT_EXIT=${PIPESTATUS[0]}
             if [ $DBT_EXIT -ne 0 ]; then
               exit $DBT_EXIT
             elif grep -q "Nothing to do" /tmp/selective_build.log; then
               echo "Selective build found nothing to run (stale manifest) - falling back to FULL build"
-              dbt build --select "path:models+" --exclude "gold_dbo_DimAges gold_dbo_DimTimeOfDay gold_dbo_DimDaysOfWeek gold_dbo_DimPeriods platinum_dbo_DaysOfWeek platinum_dbo_TimeOfDay platinum_dbo_Periods" --target test --no-fail-fast --profiles-dir .
+              dbt build --select "path:models+" --target test --no-fail-fast --profiles-dir .
             fi
           else
             echo "No manifest available (expired or first run) - falling back to FULL build"
-            dbt build --select "path:models+" --exclude "gold_dbo_DimAges gold_dbo_DimTimeOfDay gold_dbo_DimDaysOfWeek gold_dbo_DimPeriods platinum_dbo_DaysOfWeek platinum_dbo_TimeOfDay platinum_dbo_Periods" --target test --no-fail-fast --profiles-dir .
+            dbt build --select "path:models+" --target test --no-fail-fast --profiles-dir .
           fi
 
       - name: Generate dbt test HTML report
@@ -349,60 +344,56 @@ jobs:
           print("CI profiles.yml written for preprod.")
           PYEOF
 
-      # Restore the manifest produced by the TEST stage in this same run.
-      # Using the test run's manifest (keyed by run_id) is intentional:
-      #   - It is always available within the same pipeline run (no expiry risk).
-      #   - A preprod-specific manifest would expire after 7 days and force a
-      #     full build on infrequent deployment schedules (e.g. fortnightly).
-      #   - Preprod builds exactly the same delta as test - which is the goal.
-      - name: Restore TEST manifest for selective build
+      # Restore the manifest from the PREVIOUS successful PREPROD run.
+      # IMPORTANT: This MUST be a PREPROD manifest (not TEST).
+      # dbt bakes the target database+schema into each node's config hash.
+      # Comparing a PREPROD manifest against a TEST manifest causes every
+      # model's hash to differ → dbt sees all models as "modified" → full build.
+      # Using a PREPROD-to-PREPROD comparison ensures only truly changed
+      # models are selected by state:modified+.
+      - name: Restore PREPROD manifest for selective build
         id: manifest_cache
         if: needs.deploy_test.outputs.build_type == 'selective'
         uses: actions/cache/restore@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
         with:
           path: previous-manifest/manifest.json
-          key: dbt-manifest-test-${{ github.run_id }}
+          key: dbt-manifest-preprod-${{ github.run_id }}
           restore-keys: |
-            dbt-manifest-test-
+            dbt-manifest-preprod-
 
       - name: Fallback check - manifest found?
         id: manifest_check
         if: needs.deploy_test.outputs.build_type == 'selective'
         run: |
           if [ -f "previous-manifest/manifest.json" ]; then
-            echo "Manifest found (from TEST stage) - selective build with state comparison"
+            echo "Manifest found (from previous PREPROD run) - selective build with state comparison"
             echo "USE_STATE=true" >> $GITHUB_OUTPUT
           else
-            echo "No manifest available - will fall back to full build"
+            echo "No PREPROD manifest in cache - will fall back to full build"
             echo "USE_STATE=false" >> $GITHUB_OUTPUT
           fi
 
       # Mirrors the test build exactly: selective when test was selective, full when test was full.
-      # TODO: Remove --exclude below once fixed by the UK team:
-      #       UDF issue (UDF_GET_TIME_OF_DAY_KEY missing in PREPROD):
-      #         - gold_dbo_DimAges, gold_dbo_DimTimeOfDay, gold_dbo_DimDaysOfWeek, gold_dbo_DimPeriods
-      #       Governance tag issue (SENSITIVEDATASET_TAG, SOURCESYSTEM_TAG, DATASET_TAG missing):
-      #         - platinum_dbo_DaysOfWeek, platinum_dbo_TimeOfDay, platinum_dbo_Periods
       - name: Build dbt models (mirrors TEST build mode)
         timeout-minutes: 30
         working-directory: datahub_refinery
         run: |
           if [ "${{ needs.deploy_test.outputs.build_type }}" == "full" ]; then
             echo "FULL build - config/macro/workflow change detected (mirrors TEST)"
-            dbt build --select "path:models+" --exclude "gold_dbo_DimAges gold_dbo_DimTimeOfDay gold_dbo_DimDaysOfWeek gold_dbo_DimPeriods platinum_dbo_DaysOfWeek platinum_dbo_TimeOfDay platinum_dbo_Periods" --target preprod --no-fail-fast --profiles-dir .
+            dbt build --select "path:models+" --target preprod --no-fail-fast --profiles-dir .
           elif [ "${{ steps.manifest_check.outputs.USE_STATE }}" == "true" ]; then
             echo "SELECTIVE build - state:modified+ (changed + downstream only, mirrors TEST)"
-            dbt build --select "state:modified+" --exclude "gold_dbo_DimAges gold_dbo_DimTimeOfDay gold_dbo_DimDaysOfWeek gold_dbo_DimPeriods platinum_dbo_DaysOfWeek platinum_dbo_TimeOfDay platinum_dbo_Periods" --state ../previous-manifest/ --target preprod --no-fail-fast --profiles-dir . 2>&1 | tee /tmp/selective_build.log
+            dbt build --select "state:modified+" --state ../previous-manifest/ --target preprod --no-fail-fast --profiles-dir . 2>&1 | tee /tmp/selective_build.log
             DBT_EXIT=${PIPESTATUS[0]}
             if [ $DBT_EXIT -ne 0 ]; then
               exit $DBT_EXIT
             elif grep -q "Nothing to do" /tmp/selective_build.log; then
               echo "Selective build found nothing to run (stale manifest) - falling back to FULL build"
-              dbt build --select "path:models+" --exclude "gold_dbo_DimAges gold_dbo_DimTimeOfDay gold_dbo_DimDaysOfWeek gold_dbo_DimPeriods platinum_dbo_DaysOfWeek platinum_dbo_TimeOfDay platinum_dbo_Periods" --target preprod --no-fail-fast --profiles-dir .
+              dbt build --select "path:models+" --target preprod --no-fail-fast --profiles-dir .
             fi
           else
             echo "No manifest available (expired or first run) - falling back to FULL build"
-            dbt build --select "path:models+" --exclude "gold_dbo_DimAges gold_dbo_DimTimeOfDay gold_dbo_DimDaysOfWeek gold_dbo_DimPeriods platinum_dbo_DaysOfWeek platinum_dbo_TimeOfDay platinum_dbo_Periods" --target preprod --no-fail-fast --profiles-dir .
+            dbt build --select "path:models+" --target preprod --no-fail-fast --profiles-dir .
           fi
 
       - name: Generate dbt test HTML report
@@ -427,6 +418,25 @@ jobs:
             datahub_refinery/target/run_results.json
           if-no-files-found: ignore
           retention-days: 15
+
+      # Save the PREPROD manifest so the NEXT PREPROD run can use it for
+      # state:modified+ comparison (PREPROD-to-PREPROD, same DB/schema configs).
+      - name: Save PREPROD manifest for next selective build
+        if: always()
+        run: |
+          mkdir -p preprod-manifest
+          if cp datahub_refinery/target/manifest.json preprod-manifest/ 2>/dev/null; then
+            echo "PREPROD manifest saved for next selective build."
+          else
+            echo "WARNING: manifest.json not found in target/ - skipping cache save (build may have failed before compile)."
+          fi
+
+      - name: Cache PREPROD manifest for next selective build
+        if: always()
+        uses: actions/cache/save@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
+        with:
+          path: preprod-manifest/manifest.json
+          key: dbt-manifest-preprod-${{ github.run_id }}
 
       # Write build_type to a file artifact so prod-deploy.yml can mirror
       # the same selective/full decision without re-running the detection logic.

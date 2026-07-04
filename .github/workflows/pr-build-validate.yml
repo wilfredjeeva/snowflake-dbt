@@ -4,15 +4,15 @@ name: Build and Validate (PR)
 # The job name 'build' matches the required status check configured
 # in the branch protection rules.
 #
-# No Snowflake connection is made here — dbt parse is a local operation.
+# No Snowflake connection is made here - dbt parse is a local operation.
 # This gives developers fast feedback (~2 min) before their changes are
 # merged to test and the full deploy pipeline runs.
 
 on:
   pull_request:
     branches:
-      - test   # feature → test PRs (developer changes)
-      - main   # test → main PRs (promotion to prod gate)
+      - test  # feature → test PRs (developer changes)
+      - main  # test → main PRs (promotion to prod gate)
   workflow_dispatch:
 
 permissions:
@@ -48,11 +48,11 @@ jobs:
           # No actual Snowflake connection is made during parse.
           pip install dbt-core==1.9.4 dbt-snowflake==1.9.2 pyyaml
 
-      # -----------------------------------------------------------------------
+      # -------------------------------------------------------------------
       # GOVERNANCE VALIDATION
       # Fails the PR check if any model is missing required metadata
       # (tags, owner, classification). Blocks merge until resolved.
-      # -----------------------------------------------------------------------
+      # -------------------------------------------------------------------
       - name: Validate governance metadata (tags, owner, classification)
         run: |
           python scripts/validate_metadata.py
@@ -62,11 +62,11 @@ jobs:
           cd datahub_refinery
           dbt deps --target test
 
-      # -----------------------------------------------------------------------
+      # -------------------------------------------------------------------
       # dbt parse — validates all SQL and YAML files compile correctly.
       # Catches Jinja errors, missing refs, bad configs before a full run.
       # Does NOT connect to Snowflake.
-      # -----------------------------------------------------------------------
+      # -------------------------------------------------------------------
       - name: Parse dbt project (syntax + ref validation)
         working-directory: datahub_refinery
         run: |

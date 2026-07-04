@@ -3,48 +3,35 @@ datahub_refinery:
   outputs:
     dev:
       type: snowflake
-      account: "{{ env_var('SNOWFLAKE_ACCOUNT', 'YOUR_ACCOUNT_ID') }}"
-      user: "{{ env_var('SNOWFLAKE_USER', 'YOUR_USERNAME') }}"
-      role: ACCOUNTADMIN
-      warehouse: COMPUTE_WH
-      database: DEV_BRONZE_ADF
-      schema: PUBLIC
-      # For local development with password authentication:
-      # password: "{{ env_var('SNOWFLAKE_PASSWORD') }}"
-
-      # For key-pair authentication (recommended for CI/CD):
-      authenticator: SNOWFLAKE_JWT
-      private_key_path: "{{ env_var('SNOWFLAKE_PRIVATE_KEY_PATH', '~/.snowflake/rsa_key.p8') }}"
-
+      role: DANDI_DEV_DBT_TRANSFORM
+      warehouse: DEV_DANDI_TRANSFORM_WH
+      database: DBTCENTRAL
+      schema: DBT_ARTIFACTS  # <- set per run
+      account: 'wccdwh'
+      user: 'SVCDBTDEV'
+      # private_key_path: /home/runner/sf_key.p8
+      # private_key_passphrase: "{{ env_var('SNOWFLAKE_PRIVATE_KEY_PASSPHRASE') }}"
     test:
       type: snowflake
-      account: "{{ env_var('SNOWFLAKE_ACCOUNT', 'YOUR_ACCOUNT_ID') }}"
-      user: "{{ env_var('SNOWFLAKE_USER', 'YOUR_USERNAME') }}"
-      role: DBT_TEST_ROLE
-      warehouse: DBT_TEST_WH
-      database: TEST_BRONZE_ADF
-      schema: PUBLIC
-      authenticator: SNOWFLAKE_JWT
-      private_key_path: "{{ env_var('SNOWFLAKE_PRIVATE_KEY_PATH', '~/.snowflake/rsa_key.p8') }}"
-
+      role: DANDI_TEST_DBT_TRANSFORM
+      warehouse: TEST_DANDI_TRANSFORM_WH
+      database: DBTCENTRAL
+      schema: DBT_ARTIFACTS  # <- set per run
+      account: 'wccdwh_test'
+      user: 'SVCDBTTEST'
     preprod:
       type: snowflake
-      account: "{{ env_var('SNOWFLAKE_ACCOUNT', 'YOUR_ACCOUNT_ID') }}"
-      user: "{{ env_var('SNOWFLAKE_USER', 'YOUR_USERNAME') }}"
-      role: DBT_PREPROD_ROLE
-      warehouse: DBT_PREPROD_WH
-      database: PREPROD_BRONZE_ADF
-      schema: PUBLIC
-      authenticator: SNOWFLAKE_JWT
-      private_key_path: "{{ env_var('SNOWFLAKE_PRIVATE_KEY_PATH', '~/.snowflake/rsa_key.p8') }}"
-
+      role: DANDI_PREPROD_DBT_TRANSFORM
+      warehouse: PREPROD_DANDI_TRANSFORM_WH
+      database: DBTCENTRAL
+      schema: DBT_ARTIFACTS  # <- set per run
+      account: 'wccdwh_preprod'
+      user: 'SVCDBTPREPROD'
     prod:
       type: snowflake
-      account: "{{ env_var('SNOWFLAKE_ACCOUNT', 'YOUR_ACCOUNT_ID') }}"
-      user: "{{ env_var('SNOWFLAKE_USER', 'YOUR_USERNAME') }}"
-      role: "{{ env_var('SNOWFLAKE_PROD_ROLE', 'DBT_PROD_ROLE') }}"
-      warehouse: "{{ env_var('SNOWFLAKE_PROD_WAREHOUSE', 'DBT_PROD_WH') }}"
-      database: PROD_BRONZE_ADF
-      schema: PUBLIC
-      authenticator: SNOWFLAKE_JWT
-      private_key_path: "{{ env_var('SNOWFLAKE_PRIVATE_KEY_PATH', '~/.snowflake/rsa_key.p8') }}"
+      role: DANDI_PROD_DBT_TRANSFORM
+      warehouse: PROD_DANDI_TRANSFORM_WH
+      database: DBTCENTRAL
+      schema: DBT_ARTIFACTS  # <- set per run
+      account: 'wccdwh_prod'
+      user: 'SVCDBTPROD'

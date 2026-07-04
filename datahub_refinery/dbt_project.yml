@@ -1,52 +1,94 @@
-name: snowflake_workspace
+name: datahub_refinery
 version: 1.0.0
 config-version: 2
 profile: datahub_refinery
 
-model-paths: ["models"]
-seed-paths: ["seeds"]
-test-paths: ["tests"]
-snapshot-paths: ["snapshots"]
-macro-paths: ["macros"]
+dispatch:
+  - macro_namespace: dbt
+    search_order: ['datahub_refinery', 'dbt']
 
-# Environment-aware database names (client standard: database-per-layer)
 vars:
-  landing_db: "{{ (target.name ~ '_LANDING_ADF') | upper }}"
-  bronze_db: "{{ (target.name ~ '_BRONZE_ADF') | upper }}"
-  silver_db: "{{ (target.name ~ '_SILVER') | upper }}"
-  gold_db: "{{ (target.name ~ '_GOLD') | upper }}"
-  platinum_db: "{{ (target.name ~ '_PLATINUM') | upper }}"
+  landing_db:  "{{ env_var('LANDING_DB',  (target.name ~ '_LANDING_ADF') | upper) }}"
+  bronze_db:   "{{ env_var('BRONZE_DB',   (target.name ~ '_BRONZE_ADF')  | upper) }}"
+  silver_db:   "{{ env_var('SILVER_DB',   (target.name ~ '_SILVER')      | upper) }}"
+  gold_db:     "{{ env_var('GOLD_DB',     (target.name ~ '_GOLD')        | upper) }}"
+  platinum_db: "{{ env_var('PLATINUM_DB', (target.name ~ '_PLATINUM')    | upper) }}"
 
-# Seeds are optional. In the real hub, ADF loads Landing.
-# Keep seeds only for demo/local testing.
-seeds:
-  snowflake_workspace:
-    +database: "{{ (target.name ~ '_LANDING_ADF') | upper }}"
-    +schema: "DEMO"
-
-models:
-  snowflake_workspace:
-    bronze_adf:
-      +database: "{{ (target.name ~ '_BRONZE_ADF') | upper }}"
-      +materialized: table
-      +tags: ["bronze_adf"]
-
-    silver:
-      +database: "{{ (target.name ~ '_SILVER') | upper }}"
-      +materialized: incremental
-      +on_schema_change: sync_all_columns
-      +tags: ["silver"]
-
-    gold:
-      +database: "{{ (target.name ~ '_GOLD') | upper }}"
-      +materialized: table
-      +tags: ["gold"]
-
-    platinum:
-      +database: "{{ (target.name ~ '_PLATINUM') | upper }}"
-      +materialized: view
-      +tags: ["platinum"]
+model-paths:
+  - models
+analysis-paths:
+  - analyses
+test-paths:
+  - tests
+seed-paths:
+  - seeds
+macro-paths:
+  - macros
+snapshot-paths: ["snapshots"]
 
 snapshots:
-  snowflake_workspace:
-    +database: "{{ (target.name ~ '_SILVER') | upper }}"
+  datahub_refinery:
+    +post-hook:
+      - "{{ cleanup_orphan_tags() }}"
+      - "{{ set_sensitive_tag() }}"
+      - "{{ set_table_tags() }}"
+      - "{{ set_column_tags() }}"
+      - "{{ val_table_tags() }}"
+      - "{{ val_column_policies() }}"
+
+    silver:
+      +target_database: "{{ env_var('SILVER_DB', (target.name ~ '_SILVER') | upper) }}"
+    gold:
+      +target_database: "{{ env_var('GOLD_DB',   (target.name ~ '_GOLD')   | upper) }}"
+
+models:
+  datahub_refinery:
+    +tmp_relation_type: table
+    +post-hook:
+      - "{{ cleanup_orphan_tags() }}"
+      - "{{ set_sensitive_tag() }}"
+      - "{{ set_table_tags() }}"
+      - "{{ set_column_tags() }}"
+      - "{{ set_tags_for_unpivot() }}"
+      - "{{ val_table_tags() }}"
+      - "{{ val_column_policies() }}"
+      - 'COMMENT ON TABLE {{ this }} IS ''This is a {{ this.database.split("_")[1] | lower }} layer {{ this.table }} table from {{ this.schema }} source'';'
+
+    landing_adf:
+      +database: "{{ env_var('LANDING_DB', (target.name ~ '_LANDING_ADF') | upper) }}"
+      +materialized: view
+
+    bronze_adf:         # models/bronze_adf/*
+      +database: "{{ env_var('BRONZE_DB',  (target.name ~ '_BRONZE_ADF')  | upper) }}"
+      +materialized: table
+      +transient: true
+      sonitus:
+        +schema: sonitus
+      dttraining:
+        +schema: dttraining
+      dttraining_ae:
+        +schema: dttraining
+      airbnb:
+        +schema: airbnb
+      addressbase:
+        +schema: addressbase
+
+    silver:             # models/silver/*
+      # folder-level defaults for all silver models
+      +database: "{{ env_var('SILVER_DB',  (target.name ~ '_SILVER')      | upper) }}"
+      +materialized: incremental
+      +incremental_strategy: merge
+      # You can set a folder-wide unique_key, but most teams set it per model
+      # +unique_key: id
+
+    gold:
+      +database: "{{ env_var('GOLD_DB',    (target.name ~ '_GOLD')        | upper) }}"
+      +materialized: table
+      +incremental_strategy: merge
+
+    platinum:
+      +database: "{{ env_var('PLATINUM_DB', (target.name ~ '_PLATINUM')   | upper) }}"
+      views:
+        +materialized: view
+      tables:
+        +materialized: table

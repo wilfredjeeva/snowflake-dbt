@@ -166,10 +166,14 @@ jobs:
           BUILD_TYPE="${{ steps.build_scope.outputs.BUILD_TYPE }}"
           USE_STATE="${{ steps.manifest_check.outputs.USE_STATE }}"
 
+          # Excluded until UCF_GET_TIME_OF_DAY_KEY UDF is available in PROD (Emma's models)
+          EXCLUDE_MODELS="gold_dbo_DimAges gold_dbo_DimDayOfWeek gold_dbo_DimTimeOfDay"
+
           if [ "$BUILD_TYPE" == "full" ]; then
             echo "FULL build - all models (config/macro/workflow change, or fallback)"
             dbt build \
               --select "path:models+" \
+              --exclude $EXCLUDE_MODELS \
               --target prod \
               --no-fail-fast \
               --full-refresh \
@@ -179,6 +183,7 @@ jobs:
             echo "SELECTIVE build - state:modified+ (changed + downstream only)"
             dbt build \
               --select "state:modified+" \
+              --exclude $EXCLUDE_MODELS \
               --state ../previous-manifest/ \
               --target prod \
               --no-fail-fast \
@@ -190,6 +195,7 @@ jobs:
               echo "Selective build found nothing to run (stale manifest) - falling back to FULL build"
               dbt build \
                 --select "path:models+" \
+                --exclude $EXCLUDE_MODELS \
                 --target prod \
                 --no-fail-fast \
                 --full-refresh \
@@ -200,6 +206,7 @@ jobs:
             echo "Selective requested but no manifest available - falling back to FULL build"
             dbt build \
               --select "path:models+" \
+              --exclude $EXCLUDE_MODELS \
               --target prod \
               --no-fail-fast \
               --full-refresh \

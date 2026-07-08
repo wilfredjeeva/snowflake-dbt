@@ -1,0 +1,36 @@
+version: 2
+
+models:
+  - name: bronze_PlanningPolicy_Monitored_Planning_Schemes
+    description: "Bronze raw copy."
+
+    config:
+      alias: 'monitored_planning_schemes'
+      tags: ["bronze_monitoredplanningschemes_test","tranche3","Iteration2"]
+
+    columns:
+      - name: RFVAL
+        description: "Not Null and unique check on RFVAL column."
+        tests:
+          - not_null
+          - unique
+
+    tests:
+      - dbt_utils.equal_rowcount:
+          meta:
+            description: "Landing vs Bronze rowcount."
+          compare_model: "{{ source('landing_planningpolicy', 'monitored_planning_schemes') }}"
+
+      - dbt_utils.equality:
+          meta:
+            description: "Landing vs Bronze equality."
+          compare_model: "{{ source('landing_planningpolicy', 'monitored_planning_schemes') }}"
+          compare_columns:
+            - SYSFILENAME
+            - SYSLASTMODIFIEDDATE
+            - RFVAL
+            - STATUS
+            - REVIEWER
+            - SUPERSEDINGCASENO
+            - COMMENTS
+            - CHANGETORECORD

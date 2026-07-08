@@ -1,0 +1,116 @@
+version: 2
+
+models:
+  - name: bronze_PlanningPolicy_BrownfieldRegister
+    description: "Bronze raw copy with SITEREFERENCE deduplication applied."
+
+    config:
+      alias: brownfieldregister
+      tags: ["bronze_brownfieldregister_test","tranche3","Iteration2"]
+
+    columns:
+      - name: SITEREFERENCE
+        description: "SITEREFERENCE must not be null and should be unique after deduplication."
+        tests:
+          - not_null
+          - unique
+
+    tests:
+      - dbt_utils.equal_rowcount:
+          meta:
+            description: "Landing vs Bronze rowcount after deduplication."
+          compare_model: |
+            (
+              select *
+              from (
+                select
+                  *,
+                  row_number() over (
+                    partition by SITEREFERENCE
+                    order by SYSLASTMODIFIEDDATE desc
+                  ) as rn
+                from {{ source('landing_planningpolicy', 'brownfieldregister') }}
+              )
+              where rn = 1
+            )
+
+      - dbt_utils.equality:
+          meta:
+            description: "Landing vs Bronze equality after deduplication."
+          compare_model: |
+            (
+              select
+                $SYSSOURCE,
+                SYSFILENAME,
+                SYSLASTMODIFIEDDATE,
+                ORGANISATIONURI,
+                ORGANISATIONLABEL,
+                SITEREFERENCE,
+                PREVIOUSLYPARTOF,
+                SITENAMEADDRESS,
+                SITEPLANURL,
+                COORDINATEREFERENCESYSTEM,
+                TRY_TO_NUMBER(GEOX, 38, 8)          as GEOX,
+                TRY_TO_NUMBER(GEOY, 38, 8)          as GEOY,
+                TRY_TO_NUMBER(HECTARES, 5, 2)       as HECTARES,
+                OWNERSHIPSTATUS,
+                DELIVERABLE,
+                PLANNINGSTATUS,
+                PERMISSIONTYPE,
+                TRY_TO_TIMESTAMP_NTZ(PERMISSIONDATE, 'DD/MM/YYYY')  as PERMISSIONDATE,
+                PLANNINGHISTORY,
+                TRY_TO_NUMBER(PROPOSEDFORPIP)       as PROPOSEDFORPIP,
+                TRY_TO_NUMBER(MINNETDWELLINGS)      as MINNETDWELLINGS,
+                DEVELOPMENTDESCRIPTION,
+                NONHOUSINGDEVELOPMENT,
+                PART2,
+                TRY_TO_NUMBER(NETWELLINGSRANGEFROM) as NETWELLINGSRANGEFROM,
+                TRY_TO_NUMBER(NETWELLINGSRANGETO)   as NETWELLINGSRANGETO,
+                HAZARDOUSSUBSTANCES,
+                SITEINFORMATION,
+                NOTES,
+                TRY_TO_TIMESTAMP_NTZ(FIRSTADDEDDATE, 'DD/MM/YYYY')  as FIRSTADDEDDATE,
+                TRY_TO_TIMESTAMP_NTZ(LASTUPDATEDDATE, 'DD/MM/YYYY') as LASTUPDATEDDATE
+              from (
+                select
+                  *,
+                  row_number() over (
+                    partition by SITEREFERENCE
+                    order by SYSLASTMODIFIEDDATE desc
+                  ) as rn
+                from {{ source('landing_planningpolicy', 'brownfieldregister') }}
+              )
+              where rn = 1
+            )
+          compare_columns:
+            - SYSSOURCE
+            - SYSFILENAME
+            - SYSLASTMODIFIEDDATE
+            - ORGANISATIONURI
+            - ORGANISATIONLABEL
+            - SITEREFERENCE
+            - PREVIOUSLYPARTOF
+            - SITENAMEADDRESS
+            - SITEPLANURL
+            - COORDINATEREFERENCESYSTEM
+            - GEOX
+            - GEOY
+            - HECTARES
+            - OWNERSHIPSTATUS
+            - DELIVERABLE
+            - PLANNINGSTATUS
+            - PERMISSIONTYPE
+            - PERMISSIONDATE
+            - PLANNINGHISTORY
+            - PROPOSEDFORPIP
+            - MINNETDWELLINGS
+            - DEVELOPMENTDESCRIPTION
+            - NONHOUSINGDEVELOPMENT
+            - PART2
+            - NETWELLINGSRANGEFROM
+            - NETWELLINGSRANGETO
+            - HAZARDOUSSUBSTANCES
+            - SITEINFORMATION
+            - NOTES
+            - FIRSTADDEDDATE
+            - LASTUPDATEDDATE

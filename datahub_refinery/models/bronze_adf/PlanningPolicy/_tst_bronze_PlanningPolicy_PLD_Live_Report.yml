@@ -1,0 +1,99 @@
+version: 2
+
+models:
+  - name: bronze_PlanningPolicy_PLD_Live_Report
+    description: "Bronze layer with typed columns (numeric and date casting applied)"
+
+    config:
+      alias: pld_live_report
+      tags: ["bronze_pldlivereport","tranche3","Iteration2"]
+
+    columns:
+      - name: ID
+        tests:
+          - not_null
+          - unique
+
+    tests:
+      - dbt_utils.equal_rowcount:
+          name: bronze_vs_landing_rowcount
+          compare_model: |
+            (select
+                $SYSSOURCE,
+                SYSFILENAME,
+                SYSLASTMODIFIEDDATE,
+                CAST(COUNTOFID AS NUMBER(38,0))         AS COUNTOFID,
+                ID,
+                STATUS,
+                CAST(TOTALGAINS AS NUMBER(38,0))        AS TOTALGAINS,
+                CAST(TOTALLOSSES AS NUMBER(38,0))       AS TOTALLOSSES,
+                CAST(GAINSCOMPLETED AS NUMBER(38,0))    AS GAINSCOMPLETED,
+                CAST(LOSSESCOMPLETED AS NUMBER(38,0))   AS LOSSESCOMPLETED,
+                CAST(REMAININGGAINS AS NUMBER(38,0))    AS REMAININGGAINS,
+                CAST(REMAININGLOST AS NUMBER(38,0))     AS REMAININGLOST,
+                CAST(LIVENET AS NUMBER(38,0))           AS LIVENET,
+                DESCRIPTION,
+                CAST(VALIDATE AS DATE)                  AS VALIDATE,
+                CAST(DECISIONDATE AS DATE)              AS DECISIONDATE,
+                DECISION,
+                APPEALDECISION,
+                CAST(APPEALDECISIONDATE AS DATE)        AS APPEALDECISIONDATE,
+                SITENAME,
+                SITENUMBER,
+                STREETNAME,
+                LOCALITY,
+                FULLPOSTCODE,
+                WARD,
+                APPLICATIONTYPEFULL,
+                POLYGON
+            from {{ source('landing_planningpolicy', 'pld_live_report') }}
+            where ID is not NULL)
+
+      - dbt_utils.equality:
+          name: bronze_vs_landing_equality_partial
+          compare_model: |
+            (select
+                SYSFILENAME,
+                SYSLASTMODIFIEDDATE,
+                CAST(COUNTOFID AS NUMBER(38,0))         AS COUNTOFID,
+                ID,
+                STATUS,
+                CAST(TOTALGAINS AS NUMBER(38,0))        AS TOTALGAINS,
+                CAST(TOTALLOSSES AS NUMBER(38,0))       AS TOTALLOSSES,
+                CAST(GAINSCOMPLETED AS NUMBER(38,0))    AS GAINSCOMPLETED,
+                CAST(LOSSESCOMPLETED AS NUMBER(38,0))   AS LOSSESCOMPLETED,
+                CAST(REMAININGGAINS AS NUMBER(38,0))    AS REMAININGGAINS,
+                CAST(REMAININGLOST AS NUMBER(38,0))     AS REMAININGLOST,
+                CAST(LIVENET AS NUMBER(38,0))           AS LIVENET,
+                DESCRIPTION,
+                CAST(VALIDATE AS DATE)                  AS VALIDATE,
+                CAST(DECISIONDATE AS DATE)              AS DECISIONDATE,
+                DECISION,
+                APPEALDECISION,
+                CAST(APPEALDECISIONDATE AS DATE)        AS APPEALDECISIONDATE,
+                SITENAME,
+                SITENUMBER,
+                STREETNAME,
+                LOCALITY,
+                FULLPOSTCODE,
+                WARD,
+                APPLICATIONTYPEFULL,
+                POLYGON
+            from {{ source('landing_planningpolicy', 'pld_live_report') }}
+            where ID is not NULL)
+          compare_columns:
+            - SYSFILENAME
+            - SYSLASTMODIFIEDDATE
+            - ID
+            - STATUS
+            - DESCRIPTION
+            - DECISION
+            - APPEALDECISION
+            - SITENAME
+            - SITENUMBER
+            - STREETNAME
+            - LOCALITY
+            - FULLPOSTCODE
+            - WARD
+            - APPLICATIONTYPEFULL
+            - POLYGON

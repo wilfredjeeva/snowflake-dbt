@@ -1,0 +1,5 @@
+version: 2
+
+models:
+  - name: planningconsultationresponses
+    description: "Temporary table for resident feedback POC (not to be used for anything else as will be deleted). Planning consultation information including dates and comments."

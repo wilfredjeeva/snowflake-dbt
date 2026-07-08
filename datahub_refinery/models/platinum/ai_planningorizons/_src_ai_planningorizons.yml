@@ -1,0 +1,9 @@
+version: 2
+
+sources:
+  - name: landing_ai_uniform_planning_poc
+    database: "{{ (target.name ~ '_LANDING_ADF') | upper }}"
+    schema: AI_UNIFORM_PLANNING_POC_TEMP
+    tables:
+      - name: planningconsultationresponses
+        loaded_at_field: syslastadddate

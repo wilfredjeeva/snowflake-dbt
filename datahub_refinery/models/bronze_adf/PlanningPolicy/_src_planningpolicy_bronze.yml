@@ -1,0 +1,13 @@
+version: 2
+
+sources:
+  - name: landing_planningpolicy
+    database: "{{ (target.name ~ '_LANDING_ADF') | upper }}"
+    schema: PLANNINGPOLICY
+    tables:
+      - name: brownfieldregister
+        loaded_at_field: sysloaddate
+      - name: monitored_planning_schemes
+        loaded_at_field: sysloaddate
+      - name: pld_live_report
+        loaded_at_field: sysloaddate

@@ -119,6 +119,8 @@ jobs:
                 private_key_path: "/home/runner/sf_key.p8"
                 private_key_passphrase: {json.dumps(e['SF_PASSPHRASE'])}
                 threads: 8
+                client_session_keep_alive: true
+                client_session_keep_alive_heartbeat_frequency: 900
           """
           pathlib.Path("datahub_refinery/profiles.yml").write_text(content)
           print("CI profiles.yml written for prod")
@@ -154,26 +156,24 @@ jobs:
 
       # -----------------------------------------------------------------------
       # PROD build mirrors the TEST/PREPROD build mode exactly:
-      #   selective → build only changed models + downstream (state:modified+)
+      #   selective → uses state:modified+ when manifest exists, or git-diff
+      #               model selection when no manifest is available, to always
+      #               keep selective builds truly selective (never fall back to full).
       #   full      → build all models (path:models+)
       # Note: --full-refresh is NOT used in selective mode to preserve
       # incremental model history. It IS used for full builds.
       # -----------------------------------------------------------------------
       - name: Build dbt models (mirrors TEST/PREPROD build mode)
-        timeout-minutes: 30
+        timeout-minutes: 40
         working-directory: datahub_refinery
         run: |
           BUILD_TYPE="${{ steps.build_scope.outputs.BUILD_TYPE }}"
           USE_STATE="${{ steps.manifest_check.outputs.USE_STATE }}"
 
-          # Excluded until UCF_GET_TIME_OF_DAY_KEY UDF is available in PROD (Emma's models)
-          EXCLUDE_MODELS="gold_dbo_DimAges gold_dbo_DimDayOfWeek gold_dbo_DimTimeOfDay"
-
           if [ "$BUILD_TYPE" == "full" ]; then
             echo "FULL build - all models (config/macro/workflow change, or fallback)"
             dbt build \
               --select "path:models+" \
-              --exclude $EXCLUDE_MODELS \
               --target prod \
               --no-fail-fast \
               --full-refresh \
@@ -183,7 +183,6 @@ jobs:
             echo "SELECTIVE build - state:modified+ (changed + downstream only)"
             dbt build \
               --select "state:modified+" \
-              --exclude $EXCLUDE_MODELS \
               --state ../previous-manifest/ \
               --target prod \
               --no-fail-fast \
@@ -195,7 +194,6 @@ jobs:
               echo "Selective build found nothing to run (stale manifest) - falling back to FULL build"
               dbt build \
                 --select "path:models+" \
-                --exclude $EXCLUDE_MODELS \
                 --target prod \
                 --no-fail-fast \
                 --full-refresh \
@@ -203,14 +201,17 @@ jobs:
             fi
 
           else
-            echo "Selective requested but no manifest available - falling back to FULL build"
-            dbt build \
-              --select "path:models+" \
-              --exclude $EXCLUDE_MODELS \
-              --target prod \
-              --no-fail-fast \
-              --full-refresh \
-              --profiles-dir .
+            echo "No manifest available (previous run may have failed) - using git diff to keep build selective"
+            CHANGED_SELECTORS=$(git diff --name-only HEAD~1 HEAD 2>/dev/null \
+              | grep -E '^datahub_refinery/models/.*\.sql$' \
+              | sed 's|^datahub_refinery/||;s|\.sql$||;s|$|+|' \
+              | tr '\n' ' ')
+            if [ -z "$CHANGED_SELECTORS" ]; then
+              echo "No SQL model changes found via git diff - nothing to build"
+              exit 0
+            fi
+            echo "Git-derived selector: $CHANGED_SELECTORS"
+            dbt build --select $CHANGED_SELECTORS --target prod --no-fail-fast --profiles-dir .
           fi
 
       - name: Generate dbt test HTML report

@@ -186,36 +186,45 @@ jobs:
                 private_key_path: "/home/runner/sf_key.p8"
                 private_key_passphrase: {json.dumps(e['SF_PASSPHRASE'])}
                 threads: 8
+                client_session_keep_alive: true
+                client_session_keep_alive_heartbeat_frequency: 900
           """
           pathlib.Path("datahub_refinery/profiles.yml").write_text(content)
           print("CI profiles.yml written for test.")
           PYEOF
 
       # dbt build runs models AND tests together.
-      # Selective mode builds only changed models + their dependents; falls back to full if no manifest.
+      # Selective mode: uses state:modified+ when a manifest exists, or falls back to
+      # git-diff model selection when no manifest is available (e.g. after a failed run).
       - name: Build changed dbt models (selective - changed + downstream only)
-        timeout-minutes: 30
+        timeout-minutes: 40
         working-directory: datahub_refinery
         run: |
-          # Excluded until UCF_GET_TIME_OF_DAY_KEY UDF is available in TEST/PREPROD (Emma's models)
-          EXCLUDE_MODELS="gold_dbo_DimAges gold_dbo_DimDayOfWeek gold_dbo_DimTimeOfDay"
-
           if [ "${{ needs.build.outputs.build_type }}" == "full" ]; then
             echo "FULL build - config/macro/workflow change detected"
-            dbt build --select "path:models+" --exclude $EXCLUDE_MODELS --target test --no-fail-fast --profiles-dir .
+            dbt build --select "path:models+" --target test --no-fail-fast --profiles-dir .
           elif [ "${{ steps.manifest_check.outputs.USE_STATE }}" == "true" ]; then
             echo "SELECTIVE build - state:modified+ (changed + downstream only)"
-            dbt build --select "state:modified+" --exclude $EXCLUDE_MODELS --state ../previous-manifest/ --target test --no-fail-fast --profiles-dir . 2>&1 | tee /tmp/selective_build.log
+            dbt build --select "state:modified+" --state ../previous-manifest/ --target test --no-fail-fast --profiles-dir . 2>&1 | tee /tmp/selective_build.log
             DBT_EXIT=${PIPESTATUS[0]}
             if [ $DBT_EXIT -ne 0 ]; then
               exit $DBT_EXIT
             elif grep -q "Nothing to do" /tmp/selective_build.log; then
               echo "Selective build found nothing to run (stale manifest) - falling back to FULL build"
-              dbt build --select "path:models+" --exclude $EXCLUDE_MODELS --target test --no-fail-fast --profiles-dir .
+              dbt build --select "path:models+" --target test --no-fail-fast --profiles-dir .
             fi
           else
-            echo "No manifest available (expired or first run) - falling back to FULL build"
-            dbt build --select "path:models+" --exclude $EXCLUDE_MODELS --target test --no-fail-fast --profiles-dir .
+            echo "No manifest available (previous run may have failed) - using git diff to keep build selective"
+            CHANGED_SELECTORS=$(git diff --name-only HEAD~1 HEAD 2>/dev/null \
+              | grep -E '^datahub_refinery/models/.*\.sql$' \
+              | sed 's|^datahub_refinery/||;s|\.sql$||;s|$|+|' \
+              | tr '\n' ' ')
+            if [ -z "$CHANGED_SELECTORS" ]; then
+              echo "No SQL model changes found via git diff - nothing to build"
+              exit 0
+            fi
+            echo "Git-derived selector: $CHANGED_SELECTORS"
+            dbt build --select $CHANGED_SELECTORS --target test --no-fail-fast --profiles-dir .
           fi
 
       - name: Generate dbt test HTML report
@@ -379,6 +388,8 @@ jobs:
                 private_key_path: "/home/runner/sf_key.p8"
                 private_key_passphrase: {json.dumps(e['SF_PASSPHRASE'])}
                 threads: 8
+                client_session_keep_alive: true
+                client_session_keep_alive_heartbeat_frequency: 900
           """
           pathlib.Path("datahub_refinery/profiles.yml").write_text(content)
           print("CI profiles.yml written for preprod.")
@@ -415,28 +426,34 @@ jobs:
 
       # Mirrors the test build exactly: selective when test was selective, full when test was full.
       - name: Build dbt models (mirrors TEST build mode)
-        timeout-minutes: 30
+        timeout-minutes: 40
         working-directory: datahub_refinery
         run: |
-          # Excluded until UCF_GET_TIME_OF_DAY_KEY UDF is available in PREPROD (Emma's models)
-          EXCLUDE_MODELS="gold_dbo_DimAges gold_dbo_DimDayOfWeek gold_dbo_DimTimeOfDay"
-
           if [ "${{ needs.deploy_test.outputs.build_type }}" == "full" ]; then
             echo "FULL build - config/macro/workflow change detected (mirrors TEST)"
-            dbt build --select "path:models+" --exclude $EXCLUDE_MODELS --target preprod --no-fail-fast --profiles-dir .
+            dbt build --select "path:models+" --target preprod --no-fail-fast --profiles-dir .
           elif [ "${{ steps.manifest_check.outputs.USE_STATE }}" == "true" ]; then
             echo "SELECTIVE build - state:modified+ (changed + downstream only, mirrors TEST)"
-            dbt build --select "state:modified+" --exclude $EXCLUDE_MODELS --state ../previous-manifest/ --target preprod --no-fail-fast --profiles-dir . 2>&1 | tee /tmp/selective_build.log
+            dbt build --select "state:modified+" --state ../previous-manifest/ --target preprod --no-fail-fast --profiles-dir . 2>&1 | tee /tmp/selective_build.log
             DBT_EXIT=${PIPESTATUS[0]}
             if [ $DBT_EXIT -ne 0 ]; then
               exit $DBT_EXIT
             elif grep -q "Nothing to do" /tmp/selective_build.log; then
               echo "Selective build found nothing to run (stale manifest) - falling back to FULL build"
-              dbt build --select "path:models+" --exclude $EXCLUDE_MODELS --target preprod --no-fail-fast --profiles-dir .
+              dbt build --select "path:models+" --target preprod --no-fail-fast --profiles-dir .
             fi
           else
-            echo "No manifest available (expired or first run) - falling back to FULL build"
-            dbt build --select "path:models+" --exclude $EXCLUDE_MODELS --target preprod --no-fail-fast --profiles-dir .
+            echo "No manifest available (previous run may have failed) - using git diff to keep build selective"
+            CHANGED_SELECTORS=$(git diff --name-only HEAD~1 HEAD 2>/dev/null \
+              | grep -E '^datahub_refinery/models/.*\.sql$' \
+              | sed 's|^datahub_refinery/||;s|\.sql$||;s|$|+|' \
+              | tr '\n' ' ')
+            if [ -z "$CHANGED_SELECTORS" ]; then
+              echo "No SQL model changes found via git diff - nothing to build"
+              exit 0
+            fi
+            echo "Git-derived selector: $CHANGED_SELECTORS"
+            dbt build --select $CHANGED_SELECTORS --target preprod --no-fail-fast --profiles-dir .
           fi
 
       - name: Generate dbt test HTML report

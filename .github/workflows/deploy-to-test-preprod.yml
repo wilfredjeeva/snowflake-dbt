@@ -2,6 +2,7 @@
 # Triggered when a PR is merged into test, or manually via workflow_dispatch.
 
 name: dandi-datahub-dbt-to-test-preprod
+run-name: ${{ github.event.pull_request.title || 'Manual run (workflow_dispatch)' }}
 
 on:
   pull_request:
@@ -620,8 +621,7 @@ jobs:
             --default-target preprod \
             --force
 
-  # Stage 4 - Promote: cherry-picks the tested commit onto a promote-SHA branch
-  # and opens a PR to main. Each feature gets its own promotion PR (ADF-style).
+  # Stage 4 - Promote: opens an isolated promotion PR to main once preprod passes.
   # Merge the PR to kick off the prod deploy workflow.
   promote_tested_commit_to_main:
     name: Promote Tested Commit to Main

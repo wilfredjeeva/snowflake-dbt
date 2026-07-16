@@ -1,12 +1,14 @@
-# CI/CD pipeline: test -> preprod (approval gate) -> main PR
-# Triggered on push to test or a manual run.
+# CI/CD pipeline: feature -> test (PR merge) -> preprod (approval gate) -> main PR
+# Triggered when a PR is merged into test, or manually via workflow_dispatch.
 
 name: dandi-datahub-dbt-to-test-preprod
 
 on:
-  push:
+  pull_request:
     branches:
       - "test"
+    types:
+      - closed
   workflow_dispatch:
 
 permissions:
@@ -23,6 +25,8 @@ jobs:
   build:
     name: Build (Compile & Validate)
     runs-on: ubuntu-latest
+    # Only run when a PR is actually merged (not just closed), or on manual dispatch.
+    if: github.event.pull_request.merged == true || github.event_name == 'workflow_dispatch'
 
     outputs:
       deploy_sha: ${{ steps.capture_sha.outputs.sha }}
@@ -50,11 +54,19 @@ jobs:
           python -m pip install --upgrade pip
           pip install dbt-core==1.9.4 dbt-snowflake==1.9.2 pyyaml
 
-      # Full build if config/macro/workflow files changed; selective otherwise.
+      # Always selective - state:modified+ handles macro/config changes via SQL hash comparison.
       - name: Detect build scope (always selective)
         id: build_scope
         run: |
-          CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || git diff --name-only HEAD)
+          # Use PR base/head SHAs for accurate diff when triggered by pull_request.
+          # Falls back to HEAD~1 for workflow_dispatch.
+          PR_BASE="${{ github.event.pull_request.base.sha }}"
+          PR_HEAD="${{ github.event.pull_request.head.sha }}"
+          if [ -n "$PR_BASE" ] && [ -n "$PR_HEAD" ]; then
+            CHANGED=$(git diff --name-only "$PR_BASE" "$PR_HEAD" 2>/dev/null || true)
+          else
+            CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || git diff --name-only HEAD)
+          fi
           echo "Changed files:"
           echo "$CHANGED"
 
@@ -66,9 +78,6 @@ jobs:
             echo ">>> Model/YAML change only."
           fi
 
-          # Always selective - state:modified+ handles macro/config changes:
-          # when a macro changes, compiled SQL changes for all models using it,
-          # so state:modified+ correctly selects only the affected models.
           echo "BUILD_TYPE=selective"         >> $GITHUB_OUTPUT
           echo "DBT_SELECTOR=state:modified+" >> $GITHUB_OUTPUT
           echo ">>> SELECTIVE build scheduled"
@@ -94,7 +103,7 @@ jobs:
     name: Deploy TEST
     runs-on: ubuntu-latest
     environment: test
-    timeout-minutes: 45
+    timeout-minutes: 80
     needs: build
 
     outputs:
@@ -197,11 +206,20 @@ jobs:
           PYEOF
 
       # dbt build runs models AND tests together.
-      # Selective mode: uses state:modified+ when a manifest exists, or falls back to
+      # Selective: state:modified+ when manifest exists; git-diff + macro:name+ fallback otherwise.
       - name: Build changed dbt models (selective - changed + downstream only)
-        timeout-minutes: 40
+        timeout-minutes: 60
         working-directory: datahub_refinery
         run: |
+          # Compute accurate git diff once (PR base→head for PR events, HEAD~1 for dispatch)
+          PR_BASE="${{ github.event.pull_request.base.sha }}"
+          PR_HEAD="${{ github.event.pull_request.head.sha }}"
+          if [ -n "$PR_BASE" ] && [ -n "$PR_HEAD" ]; then
+            GIT_CHANGED=$(git diff --name-only "$PR_BASE" "$PR_HEAD" 2>/dev/null || true)
+          else
+            GIT_CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || true)
+          fi
+
           if [ "${{ steps.manifest_check.outputs.USE_STATE }}" == "true" ]; then
             echo "SELECTIVE build - state:modified+ (changed + downstream only)"
             dbt build --select "state:modified+" --state ../previous-manifest/ --target test --no-fail-fast --profiles-dir . 2>&1 | tee /tmp/selective_build.log
@@ -211,11 +229,11 @@ jobs:
             elif grep -q "Nothing to do" /tmp/selective_build.log; then
               echo "state:modified+ found nothing to run (re-run scenario - manifest is from same commit)"
               echo "Using git diff + macro selector to keep build selective"
-              MODEL_SELECTORS=$(git diff --name-only HEAD~1 HEAD 2>/dev/null \
+              MODEL_SELECTORS=$(echo "$GIT_CHANGED" \
                 | grep -E '^datahub_refinery/models/.*\.sql$' \
                 | sed 's|^datahub_refinery/||;s|\.sql$||;s|$|+|' \
                 | tr '\n' ' ')
-              MACRO_SELECTORS=$(git diff --name-only HEAD~1 HEAD 2>/dev/null \
+              MACRO_SELECTORS=$(echo "$GIT_CHANGED" \
                 | grep -E '^datahub_refinery/macros/.*\.sql$' \
                 | sed 's|.*/||;s|\.sql$||' \
                 | awk '{print "macro:"$1"+"}' \
@@ -230,11 +248,11 @@ jobs:
             fi
           else
             echo "No manifest available - using git diff + macro selector to stay selective"
-            MODEL_SELECTORS=$(git diff --name-only HEAD~1 HEAD 2>/dev/null \
+            MODEL_SELECTORS=$(echo "$GIT_CHANGED" \
               | grep -E '^datahub_refinery/models/.*\.sql$' \
               | sed 's|^datahub_refinery/||;s|\.sql$||;s|$|+|' \
               | tr '\n' ' ')
-            MACRO_SELECTORS=$(git diff --name-only HEAD~1 HEAD 2>/dev/null \
+            MACRO_SELECTORS=$(echo "$GIT_CHANGED" \
               | grep -E '^datahub_refinery/macros/.*\.sql$' \
               | sed 's|.*/||;s|\.sql$||' \
               | awk '{print "macro:"$1"+"}' \
@@ -325,7 +343,7 @@ jobs:
     name: Deploy PREPROD
     runs-on: ubuntu-latest
     environment: preprod
-    timeout-minutes: 45
+    timeout-minutes: 80
     needs: deploy_test
 
     outputs:
@@ -447,9 +465,18 @@ jobs:
 
       # Always selective - mirrors TEST. state:modified+ handles macro/config changes automatically.
       - name: Build dbt models (selective - mirrors TEST)
-        timeout-minutes: 40
+        timeout-minutes: 60
         working-directory: datahub_refinery
         run: |
+          # Compute accurate git diff once (PR base→head for PR events, HEAD~1 for dispatch)
+          PR_BASE="${{ github.event.pull_request.base.sha }}"
+          PR_HEAD="${{ github.event.pull_request.head.sha }}"
+          if [ -n "$PR_BASE" ] && [ -n "$PR_HEAD" ]; then
+            GIT_CHANGED=$(git diff --name-only "$PR_BASE" "$PR_HEAD" 2>/dev/null || true)
+          else
+            GIT_CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || true)
+          fi
+
           if [ "${{ steps.manifest_check.outputs.USE_STATE }}" == "true" ]; then
             echo "SELECTIVE build - state:modified+ (changed + downstream only, mirrors TEST)"
             dbt build --select "state:modified+" --state ../previous-manifest/ --target preprod --no-fail-fast --profiles-dir . 2>&1 | tee /tmp/selective_build.log
@@ -459,11 +486,11 @@ jobs:
             elif grep -q "Nothing to do" /tmp/selective_build.log; then
               echo "state:modified+ found nothing to run (re-run scenario - manifest is from same commit)"
               echo "Using git diff + macro selector to keep build selective"
-              MODEL_SELECTORS=$(git diff --name-only HEAD~1 HEAD 2>/dev/null \
+              MODEL_SELECTORS=$(echo "$GIT_CHANGED" \
                 | grep -E '^datahub_refinery/models/.*\.sql$' \
                 | sed 's|^datahub_refinery/||;s|\.sql$||;s|$|+|' \
                 | tr '\n' ' ')
-              MACRO_SELECTORS=$(git diff --name-only HEAD~1 HEAD 2>/dev/null \
+              MACRO_SELECTORS=$(echo "$GIT_CHANGED" \
                 | grep -E '^datahub_refinery/macros/.*\.sql$' \
                 | sed 's|.*/||;s|\.sql$||' \
                 | awk '{print "macro:"$1"+"}' \
@@ -478,11 +505,11 @@ jobs:
             fi
           else
             echo "No manifest available - using git diff + macro selector to stay selective"
-            MODEL_SELECTORS=$(git diff --name-only HEAD~1 HEAD 2>/dev/null \
+            MODEL_SELECTORS=$(echo "$GIT_CHANGED" \
               | grep -E '^datahub_refinery/models/.*\.sql$' \
               | sed 's|^datahub_refinery/||;s|\.sql$||;s|$|+|' \
               | tr '\n' ' ')
-            MACRO_SELECTORS=$(git diff --name-only HEAD~1 HEAD 2>/dev/null \
+            MACRO_SELECTORS=$(echo "$GIT_CHANGED" \
               | grep -E '^datahub_refinery/macros/.*\.sql$' \
               | sed 's|.*/||;s|\.sql$||' \
               | awk '{print "macro:"$1"+"}' \
@@ -593,7 +620,8 @@ jobs:
             --default-target preprod \
             --force
 
-  # Stage 4 - Promote: opens a PR from test -> main once preprod passes.
+  # Stage 4 - Promote: cherry-picks the tested commit onto a promote-SHA branch
+  # and opens a PR to main. Each feature gets its own promotion PR (ADF-style).
   # Merge the PR to kick off the prod deploy workflow.
   promote_tested_commit_to_main:
     name: Promote Tested Commit to Main
@@ -609,10 +637,10 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Promote tested commit - open PR test -> main
+      - name: Promote tested commit - cherry-pick to main PR
         env:
           GH_TOKEN: ${{ github.token }}
-          DEPLOY_SHA: ${{ needs.deploy_preprod.outputs.deploy_sha }}
+          COMMIT_SHA: ${{ needs.deploy_preprod.outputs.deploy_sha }}
         run: |
           set -euo pipefail
 
@@ -620,25 +648,54 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
-          SHORT_SHA="${DEPLOY_SHA:0:7}"
-          echo "Promoting tested commit $DEPLOY_SHA (short: $SHORT_SHA)"
+          SHORT_SHA="${COMMIT_SHA:0:7}"
+          PROMO_BRANCH="promote-${SHORT_SHA}"
+
+          echo "Promoting tested commit $COMMIT_SHA via branch $PROMO_BRANCH"
 
           git fetch origin main test
 
           # Confirm the SHA exists before doing anything.
-          git cat-file -e "$DEPLOY_SHA^{commit}"
-          echo "SHA validated: $DEPLOY_SHA exists."
+          git cat-file -e "$COMMIT_SHA^{commit}"
+          echo "SHA validated: $COMMIT_SHA exists."
 
-          # Skip if test is already fully merged into main.
-          if git diff --quiet origin/main...origin/test; then
-            echo "Nothing to promote - test is already in main. Skipping PR."
+          # Skip if commit is already in main.
+          if git merge-base --is-ancestor "$COMMIT_SHA" origin/main; then
+            echo "Nothing to promote - commit already in main. Skipping PR."
             exit 0
           fi
 
-          cat > body.md <<EOF
-          ## 🚀 Automated Promotion: test -> main
+          # Create promotion branch from main.
+          git checkout -B "$PROMO_BRANCH" origin/main
 
-          All pipeline stages passed - this PR is ready to merge.
+          CHERRY_PICK_OK=true
+
+          # Handle merge commits (cherry-pick -m 1) vs normal commits.
+          if git rev-parse "${COMMIT_SHA}^2" >/dev/null 2>&1; then
+            echo "Merge commit detected; cherry-picking with -m 1"
+            if ! git cherry-pick -m 1 "$COMMIT_SHA"; then
+              CHERRY_PICK_OK=false
+            fi
+          else
+            echo "Normal commit; cherry-picking without -m"
+            if ! git cherry-pick "$COMMIT_SHA"; then
+              CHERRY_PICK_OK=false
+            fi
+          fi
+
+          # Skip if cherry-pick produced no diff (already in main).
+          if [[ "$CHERRY_PICK_OK" == "true" ]] && git diff --quiet origin/main...HEAD; then
+            echo "Nothing to promote; already in main or empty cherry-pick."
+            exit 0
+          fi
+
+          echo "Pushing branch..."
+          git push -u origin "$PROMO_BRANCH" --force-with-lease
+
+          cat > body.md <<EOF
+          ## 🚀 Automated Promotion: feature → test → main
+
+          All pipeline stages passed for commit \`${COMMIT_SHA}\`.
 
           | Stage | Status |
           |-------|--------|
@@ -646,17 +703,26 @@ jobs:
           | ✅ Deploy TEST | Passed |
           | ✅ Deploy PREPROD (approved) | Passed |
 
-          **Pinned commit SHA:** \`${DEPLOY_SHA}\`
-          **Short SHA:** \`${SHORT_SHA}\`
-          **Workflow:** \`${GITHUB_WORKFLOW}\`
-          **Run:** \`${GITHUB_RUN_ID}\`
+          - **Workflow:** \`${GITHUB_WORKFLOW}\`
+          - **Run:** \`${GITHUB_RUN_ID}\`
+          - **Promotion branch:** \`${PROMO_BRANCH}\`
+          - **Target branch:** \`main\`
 
           > _Merge this PR to trigger the PROD deploy workflow._
           EOF
 
+          if [[ "$CHERRY_PICK_OK" == "false" ]]; then
+            cat >> body.md <<EOF
+
+          ⚠️ **Cherry-pick conflict detected**
+          This PR was created to allow manual conflict resolution before merging to main.
+          EOF
+          fi
+
+          echo "Creating PR $PROMO_BRANCH -> main..."
           gh pr create \
             --base main \
-            --head test \
+            --head "$PROMO_BRANCH" \
             --title "Promote ${SHORT_SHA} to main" \
             --body-file body.md \
           || echo "PR may already exist; continuing."

@@ -50,10 +50,10 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install Python dependencies
+      - name: Install dbt and Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pyyaml
+          pip install dbt-core==1.9.4 dbt-snowflake==1.9.2 pyyaml
 
       # Always selective - state:modified+ handles macro/config changes via SQL hash comparison.
       - name: Detect build scope (always selective)
@@ -88,6 +88,23 @@ jobs:
           pip install pyyaml --quiet
           python scripts/validate_metadata.py
 
+      - name: Install dbt packages
+        run: |
+          cd datahub_refinery
+          dbt deps --target test
+
+      - name: dbt parse (compile / syntax check)
+        working-directory: datahub_refinery
+        run: |
+          dbt parse --target test --profiles-dir .
+          echo "dbt compile passed - project is syntactically valid."
+
+      - name: Cache compiled manifest for Deploy jobs
+        if: success()
+        uses: actions/cache/save@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
+        with:
+          path: datahub_refinery/target/manifest.json
+          key: dbt-compiled-manifest-${{ github.run_id }}
 
   # Stage 2 - Deploy TEST: run dbt build on the exact tested commit.
   deploy_test:
@@ -195,6 +212,15 @@ jobs:
           pathlib.Path("datahub_refinery/profiles.yml").write_text(content)
           print("CI profiles.yml written for test.")
           PYEOF
+
+      # Restore the compiled manifest from the Build job to enable partial parsing.
+      # Without this, dbt does a full parse of all 521 models (~10 mins).
+      # With this, dbt only re-compiles models that changed (~30 seconds).
+      - name: Restore compiled manifest for partial parsing
+        uses: actions/cache/restore@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
+        with:
+          path: datahub_refinery/target/manifest.json
+          key: dbt-compiled-manifest-${{ github.run_id }}
 
       # dbt build runs models AND tests together.
       # Selective: state:modified+ when manifest exists; git-diff + macro:name+ fallback otherwise.
@@ -459,6 +485,13 @@ jobs:
         timeout-minutes: 60
         working-directory: datahub_refinery
         run: |
+          # Seed target/manifest.json from the PREPROD state manifest for partial parsing.
+          # Without this, dbt does a full parse of all 521 models (~10 mins).
+          if [ -f "../previous-manifest/manifest.json" ] && [ ! -f "target/manifest.json" ]; then
+            cp ../previous-manifest/manifest.json target/manifest.json
+            echo "PREPROD state manifest seeded into target/ for partial parsing."
+          fi
+
           # Compute accurate git diff once (PR base→head for PR events, HEAD~1 for dispatch)
           PR_BASE="${{ github.event.pull_request.base.sha }}"
           PR_HEAD="${{ github.event.pull_request.head.sha }}"

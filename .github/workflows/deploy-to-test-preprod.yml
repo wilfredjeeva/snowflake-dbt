@@ -228,6 +228,21 @@ jobs:
         timeout-minutes: 60
         working-directory: datahub_refinery
         run: |
+          # -----------------------------------------------------------------------
+          # Seed target/manifest.json for partial parsing.
+          # The state manifest was compiled with CI credentials against the same
+          # project. dbt uses FILE CHECKSUMS (not compiled SQL) for partial parse,
+          # so only the 2-3 changed .sql files are re-compiled (~30 sec vs 8+ min).
+          # Without this, dbt does a full parse of all 521+ models on every run.
+          # -----------------------------------------------------------------------
+          if [ -f "../previous-manifest/manifest.json" ]; then
+            mkdir -p target
+            cp ../previous-manifest/manifest.json target/manifest.json
+            echo "State manifest seeded into target/ - partial parsing enabled."
+          else
+            echo "No state manifest found - dbt will do a full parse (first-ever deployment)."
+          fi
+
           # Compute accurate git diff once (PR base→head for PR events, HEAD~1 for dispatch)
           PR_BASE="${{ github.event.pull_request.base.sha }}"
           PR_HEAD="${{ github.event.pull_request.head.sha }}"

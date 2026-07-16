@@ -637,10 +637,11 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Promote tested commit - cherry-pick to main PR
+      - name: Promote tested commit to main
         env:
           GH_TOKEN: ${{ github.token }}
           COMMIT_SHA: ${{ needs.deploy_preprod.outputs.deploy_sha }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
 
@@ -648,16 +649,62 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
-          SHORT_SHA="${COMMIT_SHA:0:7}"
-          PROMO_BRANCH="promote-${SHORT_SHA}"
-
-          echo "Promoting tested commit $COMMIT_SHA via branch $PROMO_BRANCH"
-
           git fetch origin main test
 
           # Confirm the SHA exists before doing anything.
           git cat-file -e "$COMMIT_SHA^{commit}"
           echo "SHA validated: $COMMIT_SHA exists."
+
+          SHORT_SHA="${COMMIT_SHA:0:7}"
+
+          # -----------------------------------------------------------------------
+          # workflow_dispatch: open a direct test -> main PR.
+          # This brings ALL accumulated changes from test into main at once,
+          # covering any PRs that were merged into test but not yet promoted.
+          # -----------------------------------------------------------------------
+          if [ "$EVENT_NAME" == "workflow_dispatch" ]; then
+            echo "Manual dispatch - opening test -> main PR to promote all accumulated changes."
+
+            if git diff --quiet origin/main...origin/test; then
+              echo "Nothing to promote - test is already in main. Skipping PR."
+              exit 0
+            fi
+
+            cat > body.md <<EOF
+          ## 🚀 Promotion: test → main (manual dispatch)
+
+          All pipeline stages passed. This PR promotes **all changes** currently in \`test\`
+          that have not yet been merged into \`main\`.
+
+          | Stage | Status |
+          |-------|--------|
+          | ✅ Build (compile + governance) | Passed |
+          | ✅ Deploy TEST | Passed |
+          | ✅ Deploy PREPROD (approved) | Passed |
+
+          - **Triggered by:** manual workflow_dispatch
+          - **Workflow:** \`${GITHUB_WORKFLOW}\`
+          - **Run:** \`${GITHUB_RUN_ID}\`
+
+          > _Merge this PR to trigger the PROD deploy workflow._
+          EOF
+
+            gh pr create \
+              --base main \
+              --head test \
+              --title "Promote test to main (manual dispatch - ${SHORT_SHA})" \
+              --body-file body.md \
+            || echo "PR may already exist; continuing."
+
+            exit 0
+          fi
+
+          # -----------------------------------------------------------------------
+          # pull_request event: cherry-pick the exact tested commit.
+          # Each merged PR gets its own isolated promote-SHA branch and PR to main.
+          # -----------------------------------------------------------------------
+          PROMO_BRANCH="promote-${SHORT_SHA}"
+          echo "PR merge - promoting commit $COMMIT_SHA via branch $PROMO_BRANCH"
 
           # Skip if commit is already in main.
           if git merge-base --is-ancestor "$COMMIT_SHA" origin/main; then

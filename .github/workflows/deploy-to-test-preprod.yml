@@ -232,7 +232,7 @@ jobs:
               echo "Using git diff + macro selector to keep build selective"
               MODEL_SELECTORS=$(echo "$GIT_CHANGED" \
                 | grep -E '^datahub_refinery/models/.*\.sql$' \
-                | sed 's|^datahub_refinery/||;s|\.sql$||;s|$|+|' \
+                | sed 's|.*/||;s|\.sql$||;s|$|+|' \
                 | tr '\n' ' ')
               MACRO_SELECTORS=$(echo "$GIT_CHANGED" \
                 | grep -E '^datahub_refinery/macros/.*\.sql$' \
@@ -251,7 +251,7 @@ jobs:
             echo "No manifest available - using git diff + macro selector to stay selective"
             MODEL_SELECTORS=$(echo "$GIT_CHANGED" \
               | grep -E '^datahub_refinery/models/.*\.sql$' \
-              | sed 's|^datahub_refinery/||;s|\.sql$||;s|$|+|' \
+              | sed 's|.*/||;s|\.sql$||;s|$|+|' \
               | tr '\n' ' ')
             MACRO_SELECTORS=$(echo "$GIT_CHANGED" \
               | grep -E '^datahub_refinery/macros/.*\.sql$' \
@@ -489,7 +489,7 @@ jobs:
               echo "Using git diff + macro selector to keep build selective"
               MODEL_SELECTORS=$(echo "$GIT_CHANGED" \
                 | grep -E '^datahub_refinery/models/.*\.sql$' \
-                | sed 's|^datahub_refinery/||;s|\.sql$||;s|$|+|' \
+                | sed 's|.*/||;s|\.sql$||;s|$|+|' \
                 | tr '\n' ' ')
               MACRO_SELECTORS=$(echo "$GIT_CHANGED" \
                 | grep -E '^datahub_refinery/macros/.*\.sql$' \
@@ -508,7 +508,7 @@ jobs:
             echo "No manifest available - using git diff + macro selector to stay selective"
             MODEL_SELECTORS=$(echo "$GIT_CHANGED" \
               | grep -E '^datahub_refinery/models/.*\.sql$' \
-              | sed 's|^datahub_refinery/||;s|\.sql$||;s|$|+|' \
+              | sed 's|.*/||;s|\.sql$||;s|$|+|' \
               | tr '\n' ' ')
             MACRO_SELECTORS=$(echo "$GIT_CHANGED" \
               | grep -E '^datahub_refinery/macros/.*\.sql$' \

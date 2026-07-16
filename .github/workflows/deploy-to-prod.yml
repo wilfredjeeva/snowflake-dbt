@@ -73,8 +73,8 @@ jobs:
             BUILD_TYPE=$(cat /tmp/build-meta/build_type.txt | tr -d '[:space:]')
             echo "Build type from unified pipeline: $BUILD_TYPE"
           else
-            BUILD_TYPE="full"
-            echo "No build type artifact found - defaulting to FULL build"
+            BUILD_TYPE="selective"
+            echo "No build type artifact found - defaulting to SELECTIVE build"
           fi
           echo "BUILD_TYPE=$BUILD_TYPE" >> $GITHUB_OUTPUT
 
@@ -150,7 +150,7 @@ jobs:
             echo "Manifest found (from cache) - selective build with state comparison"
             echo "USE_STATE=true" >> $GITHUB_OUTPUT
           else
-            echo "No manifest in cache - will fall back to full build"
+            echo "No manifest in cache - will use git-diff selector to stay selective"
             echo "USE_STATE=false" >> $GITHUB_OUTPUT
           fi
 
@@ -191,7 +191,8 @@ jobs:
             if [ $DBT_EXIT -ne 0 ]; then
               exit $DBT_EXIT
             elif grep -q "Nothing to do" /tmp/selective_build.log; then
-              echo "state:modified+ found nothing to run (manifest is from same commit - re-run scenario) - using git diff to keep selective"
+              echo "state:modified+ found nothing to run (re-run scenario - manifest is from same commit)"
+              echo "Using git diff to keep build selective"
               CHANGED_SELECTORS=$(git diff --name-only HEAD~1 HEAD 2>/dev/null \
                 | grep -E '^datahub_refinery/models/.*\.sql$' \
                 | sed 's|^datahub_refinery/||;s|\.sql$||;s|$|+|' \

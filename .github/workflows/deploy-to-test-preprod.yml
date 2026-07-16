@@ -19,15 +19,14 @@ env:
   DBT_PROJECT_OBJECT_NAME: datahub_refinery
 
 jobs:
-
-# Stage 1 - Build: compile, governance check, capture the commit SHA.
+  # Stage 1 - Build: compile, governance check, capture the commit SHA.
   build:
     name: Build (Compile & Validate)
     runs-on: ubuntu-latest
 
     outputs:
-      deploy_sha:   ${{ steps.capture_sha.outputs.sha }}
-      build_type:   ${{ steps.build_scope.outputs.BUILD_TYPE }}
+      deploy_sha: ${{ steps.capture_sha.outputs.sha }}
+      build_type: ${{ steps.build_scope.outputs.BUILD_TYPE }}
       dbt_selector: ${{ steps.build_scope.outputs.DBT_SELECTOR }}
 
     steps:
@@ -52,7 +51,7 @@ jobs:
           pip install dbt-core==1.9.4 dbt-snowflake==1.9.2 pyyaml
 
       # Full build if config/macro/workflow files changed; selective otherwise.
-      - name: Detect build scope (full vs selective)
+      - name: Detect build scope (always selective)
         id: build_scope
         run: |
           CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || git diff --name-only HEAD)
@@ -61,14 +60,18 @@ jobs:
 
           if echo "$CHANGED" | grep -qE \
             '(dbt_project\.yml|profiles\.yml|packages\.yml|datahub_refinery/macros/|\.github/workflows/)'; then
-            echo "BUILD_TYPE=full"           >> $GITHUB_OUTPUT
-            echo "DBT_SELECTOR=path:models+" >> $GITHUB_OUTPUT
-            echo ">>> CONFIG or MACRO change detected - FULL build scheduled"
+            echo ">>> Config/macro/workflow change detected."
+            echo ">>> state:modified+ detects affected models automatically via SQL hash comparison."
           else
-            echo "BUILD_TYPE=selective"           >> $GITHUB_OUTPUT
-            echo "DBT_SELECTOR=state:modified+"   >> $GITHUB_OUTPUT
-            echo ">>> Model/YAML change only - SELECTIVE build scheduled"
+            echo ">>> Model/YAML change only."
           fi
+
+          # Always selective - state:modified+ handles macro/config changes:
+          # when a macro changes, compiled SQL changes for all models using it,
+          # so state:modified+ correctly selects only the affected models.
+          echo "BUILD_TYPE=selective"         >> $GITHUB_OUTPUT
+          echo "DBT_SELECTOR=state:modified+" >> $GITHUB_OUTPUT
+          echo ">>> SELECTIVE build scheduled"
 
       - name: Validate governance metadata (tags, owner, classification)
         run: |
@@ -86,7 +89,7 @@ jobs:
           dbt parse --target test --profiles-dir .
           echo "dbt compile passed - project is syntactically valid."
 
-# Stage 2 - Deploy TEST: run dbt build on the exact tested commit.
+  # Stage 2 - Deploy TEST: run dbt build on the exact tested commit.
   deploy_test:
     name: Deploy TEST
     runs-on: ubuntu-latest
@@ -95,8 +98,8 @@ jobs:
     needs: build
 
     outputs:
-      deploy_sha:   ${{ needs.build.outputs.deploy_sha }}
-      build_type:   ${{ needs.build.outputs.build_type }}
+      deploy_sha: ${{ needs.build.outputs.deploy_sha }}
+      build_type: ${{ needs.build.outputs.build_type }}
       dbt_selector: ${{ needs.build.outputs.dbt_selector }}
 
     steps:
@@ -146,7 +149,7 @@ jobs:
             echo "Manifest found (from cache) - selective build with state comparison"
             echo "USE_STATE=true" >> $GITHUB_OUTPUT
           else
-            echo "No manifest in cache - will fall back to full build"
+            echo "No manifest in cache - will use git-diff selector to stay selective"
             echo "USE_STATE=false" >> $GITHUB_OUTPUT
           fi
 
@@ -161,12 +164,12 @@ jobs:
 
       - name: Write CI profiles.yml (test)
         env:
-          SF_ACCOUNT:    ${{ secrets.SNOWFLAKE_ACCOUNT }}
-          SF_USER:       ${{ secrets.SNOWFLAKE_USER }}
-          SF_ROLE:       ${{ secrets.SNOWFLAKE_ROLE }}
-          SF_WAREHOUSE:  ${{ secrets.SNOWFLAKE_WAREHOUSE }}
-          SF_DB:         ${{ secrets.SNOWFLAKE_DB }}
-          SF_SCHEMA:     ${{ secrets.SNOWFLAKE_SCHEMA }}
+          SF_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SF_USER: ${{ secrets.SNOWFLAKE_USER }}
+          SF_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
+          SF_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+          SF_DB: ${{ secrets.SNOWFLAKE_DB }}
+          SF_SCHEMA: ${{ secrets.SNOWFLAKE_SCHEMA }}
           SF_PASSPHRASE: ${{ secrets.SNOWFLAKE_KEY_PASSPHRASE }}
         run: |
           python3 - << 'PYEOF'
@@ -195,22 +198,19 @@ jobs:
 
       # dbt build runs models AND tests together.
       # Selective mode: uses state:modified+ when a manifest exists, or falls back to
-      # git-diff model selection when no manifest is available (e.g. after a failed run).
       - name: Build changed dbt models (selective - changed + downstream only)
         timeout-minutes: 40
         working-directory: datahub_refinery
         run: |
-          if [ "${{ needs.build.outputs.build_type }}" == "full" ]; then
-            echo "FULL build - config/macro/workflow change detected"
-            dbt build --select "path:models+" --target test --no-fail-fast --profiles-dir .
-          elif [ "${{ steps.manifest_check.outputs.USE_STATE }}" == "true" ]; then
+          if [ "${{ steps.manifest_check.outputs.USE_STATE }}" == "true" ]; then
             echo "SELECTIVE build - state:modified+ (changed + downstream only)"
             dbt build --select "state:modified+" --state ../previous-manifest/ --target test --no-fail-fast --profiles-dir . 2>&1 | tee /tmp/selective_build.log
             DBT_EXIT=${PIPESTATUS[0]}
             if [ $DBT_EXIT -ne 0 ]; then
               exit $DBT_EXIT
             elif grep -q "Nothing to do" /tmp/selective_build.log; then
-              echo "state:modified+ found nothing to run (manifest is from same commit - re-run scenario) - using git diff to keep selective"
+              echo "state:modified+ found nothing to run (re-run scenario - manifest is from same commit)"
+              echo "Using git diff to keep build selective"
               CHANGED_SELECTORS=$(git diff --name-only HEAD~1 HEAD 2>/dev/null \
                 | grep -E '^datahub_refinery/models/.*\.sql$' \
                 | sed 's|^datahub_refinery/||;s|\.sql$||;s|$|+|' \
@@ -223,7 +223,12 @@ jobs:
               dbt build --select $CHANGED_SELECTORS --target test --no-fail-fast --profiles-dir .
             fi
           else
-            echo "No manifest available (previous run may have failed) - using git diff to keep build selective"
+            echo "No manifest available - using git diff to keep build selective"
+            if git diff --name-only HEAD~1 HEAD 2>/dev/null | grep -qE 'datahub_refinery/macros/|dbt_project\.yml|packages\.yml'; then
+              echo "WARNING: Macro/config changes detected but no manifest available."
+              echo "Models affected by macro changes cannot be determined without a manifest."
+              echo "Run will build only directly changed SQL files."
+            fi
             CHANGED_SELECTORS=$(git diff --name-only HEAD~1 HEAD 2>/dev/null \
               | grep -E '^datahub_refinery/models/.*\.sql$' \
               | sed 's|^datahub_refinery/||;s|\.sql$||;s|$|+|' \
@@ -307,8 +312,8 @@ jobs:
             --default-target test \
             --force
 
-# Stage 3 - Deploy PREPROD: waits for manual approval, then deploys the same commit.
-# Set required reviewers under Settings -> Environments -> preprod.
+  # Stage 3 - Deploy PREPROD: waits for manual approval, then deploys the same commit.
+  # Set required reviewers under Settings -> Environments -> preprod.
   deploy_preprod:
     name: Deploy PREPROD
     runs-on: ubuntu-latest
@@ -317,8 +322,8 @@ jobs:
     needs: deploy_test
 
     outputs:
-      deploy_sha:   ${{ needs.deploy_test.outputs.deploy_sha }}
-      build_type:   ${{ needs.deploy_test.outputs.build_type }}
+      deploy_sha: ${{ needs.deploy_test.outputs.deploy_sha }}
+      build_type: ${{ needs.deploy_test.outputs.build_type }}
       dbt_selector: ${{ needs.deploy_test.outputs.dbt_selector }}
 
     steps:
@@ -372,12 +377,12 @@ jobs:
 
       - name: Write CI profiles.yml (preprod)
         env:
-          SF_ACCOUNT:    ${{ secrets.SNOWFLAKE_ACCOUNT }}
-          SF_USER:       ${{ secrets.SNOWFLAKE_USER }}
-          SF_ROLE:       ${{ secrets.SNOWFLAKE_ROLE }}
-          SF_WAREHOUSE:  ${{ secrets.SNOWFLAKE_WAREHOUSE }}
-          SF_DB:         ${{ secrets.SNOWFLAKE_DB }}
-          SF_SCHEMA:     ${{ secrets.SNOWFLAKE_SCHEMA }}
+          SF_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SF_USER: ${{ secrets.SNOWFLAKE_USER }}
+          SF_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
+          SF_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+          SF_DB: ${{ secrets.SNOWFLAKE_DB }}
+          SF_SCHEMA: ${{ secrets.SNOWFLAKE_SCHEMA }}
           SF_PASSPHRASE: ${{ secrets.SNOWFLAKE_KEY_PASSPHRASE }}
         run: |
           python3 - << 'PYEOF'
@@ -429,26 +434,24 @@ jobs:
             echo "Manifest found (from previous PREPROD run) - selective build with state comparison"
             echo "USE_STATE=true" >> $GITHUB_OUTPUT
           else
-            echo "No PREPROD manifest in cache - will fall back to full build"
+            echo "No PREPROD manifest in cache - will use git-diff selector to stay selective"
             echo "USE_STATE=false" >> $GITHUB_OUTPUT
           fi
 
-      # Mirrors the test build exactly: selective when test was selective, full when test was full.
-      - name: Build dbt models (mirrors TEST build mode)
+      # Always selective - mirrors TEST. state:modified+ handles macro/config changes automatically.
+      - name: Build dbt models (selective - mirrors TEST)
         timeout-minutes: 40
         working-directory: datahub_refinery
         run: |
-          if [ "${{ needs.deploy_test.outputs.build_type }}" == "full" ]; then
-            echo "FULL build - config/macro/workflow change detected (mirrors TEST)"
-            dbt build --select "path:models+" --target preprod --no-fail-fast --profiles-dir .
-          elif [ "${{ steps.manifest_check.outputs.USE_STATE }}" == "true" ]; then
+          if [ "${{ steps.manifest_check.outputs.USE_STATE }}" == "true" ]; then
             echo "SELECTIVE build - state:modified+ (changed + downstream only, mirrors TEST)"
             dbt build --select "state:modified+" --state ../previous-manifest/ --target preprod --no-fail-fast --profiles-dir . 2>&1 | tee /tmp/selective_build.log
             DBT_EXIT=${PIPESTATUS[0]}
             if [ $DBT_EXIT -ne 0 ]; then
               exit $DBT_EXIT
             elif grep -q "Nothing to do" /tmp/selective_build.log; then
-              echo "state:modified+ found nothing to run (manifest is from same commit - re-run scenario) - using git diff to keep selective"
+              echo "state:modified+ found nothing to run (re-run scenario - manifest is from same commit)"
+              echo "Using git diff to keep build selective"
               CHANGED_SELECTORS=$(git diff --name-only HEAD~1 HEAD 2>/dev/null \
                 | grep -E '^datahub_refinery/models/.*\.sql$' \
                 | sed 's|^datahub_refinery/||;s|\.sql$||;s|$|+|' \
@@ -461,7 +464,12 @@ jobs:
               dbt build --select $CHANGED_SELECTORS --target preprod --no-fail-fast --profiles-dir .
             fi
           else
-            echo "No manifest available (previous run may have failed) - using git diff to keep build selective"
+            echo "No manifest available - using git diff to keep build selective"
+            if git diff --name-only HEAD~1 HEAD 2>/dev/null | grep -qE 'datahub_refinery/macros/|dbt_project\.yml|packages\.yml'; then
+              echo "WARNING: Macro/config changes detected but no manifest available."
+              echo "Models affected by macro changes cannot be determined without a manifest."
+              echo "Run will build only directly changed SQL files."
+            fi
             CHANGED_SELECTORS=$(git diff --name-only HEAD~1 HEAD 2>/dev/null \
               | grep -E '^datahub_refinery/models/.*\.sql$' \
               | sed 's|^datahub_refinery/||;s|\.sql$||;s|$|+|' \
@@ -571,8 +579,8 @@ jobs:
             --default-target preprod \
             --force
 
-# Stage 4 - Promote: opens a PR from test -> main once preprod passes.
-# Merge the PR to kick off the prod deploy workflow.
+  # Stage 4 - Promote: opens a PR from test -> main once preprod passes.
+  # Merge the PR to kick off the prod deploy workflow.
   promote_tested_commit_to_main:
     name: Promote Tested Commit to Main
     runs-on: ubuntu-latest

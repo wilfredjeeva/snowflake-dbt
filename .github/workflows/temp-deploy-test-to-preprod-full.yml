@@ -1,4 +1,4 @@
-# TEMPORARY WORKFLOW — Full build of test branch → PREPROD
+# TEMPORARY WORKFLOW - Full build of test branch -> PREPROD
 # Purpose  : One-shot deployment of everything currently on the test branch into PREPROD.
 # Trigger  : Manual only (workflow_dispatch).
 # Cleanup  : Delete this file once the permanent redesign is in place.
@@ -26,9 +26,7 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      # -----------------------------------------------------------------------
       # Checkout the latest HEAD of the test branch explicitly.
-      # -----------------------------------------------------------------------
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: test
@@ -64,11 +62,9 @@ jobs:
           cd datahub_refinery
           dbt deps --target preprod
 
-      # -----------------------------------------------------------------------
       # Write CI profiles.yml for PREPROD.
       # client_session_keep_alive + heartbeat_frequency prevent the Snowflake
       # session from timing out during a long full build (> 2 h).
-      # -----------------------------------------------------------------------
       - name: Write CI profiles.yml (preprod)
         env:
           SF_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
@@ -96,7 +92,6 @@ jobs:
                 private_key_path: "/home/runner/sf_key.p8"
                 private_key_passphrase: {json.dumps(e['SF_PASSPHRASE'])}
                 threads: 8
-                # Keep the Snowflake session alive during long full builds (> 2 h).
                 client_session_keep_alive: true
                 client_session_keep_alive_heartbeat_frequency: 900
           """
@@ -104,23 +99,20 @@ jobs:
           print("CI profiles.yml written for preprod.")
           PYEOF
 
-      # -----------------------------------------------------------------------
-      # FULL build — selects every model in the project (path:models+).
+      # FULL build - selects every model in the project (path:models+).
       # No state comparison, no git-diff filtering.
-      # --no-fail-fast lets all models attempt to run before failing the job,
-      # giving a complete picture of what passed/failed.
-      # -----------------------------------------------------------------------
-      - name: Full dbt build — all models (test branch → PREPROD)
+      # --no-fail-fast lets all models attempt to run before failing the job.
+      - name: Full dbt build - all models (test branch -> PREPROD)
         timeout-minutes: 340
         working-directory: datahub_refinery
         run: |
-          echo "Starting FULL dbt build on PREPROD — $(date -u)"
+          echo "Starting FULL dbt build on PREPROD - $(date -u)"
           dbt build \
             --select "path:models+" \
             --target preprod \
             --no-fail-fast \
             --profiles-dir .
-          echo "dbt build complete — $(date -u)"
+          echo "dbt build complete - $(date -u)"
 
       - name: Generate dbt test HTML report
         if: always()
@@ -145,16 +137,14 @@ jobs:
           if-no-files-found: ignore
           retention-days: 15
 
-      # -----------------------------------------------------------------------
       # Clean compiled artifacts before Snowflake CLI stages the project.
       # Avoids the SecurePath "Cannot join path to a file" error.
       # dbt_packages/ is intentionally retained for runtime macro resolution.
-      # -----------------------------------------------------------------------
       - name: Clean dbt artifacts before Snowflake deploy
         run: |
           rm -rf "$GITHUB_WORKSPACE/datahub_refinery/target"
           rm -rf "$GITHUB_WORKSPACE/datahub_refinery/logs"
-          echo "Cleaned target/ and logs/ — dbt_packages/ retained for deploy"
+          echo "Cleaned target/ and logs/ - dbt_packages/ retained for deploy"
 
       - name: Deploy dbt project object to Snowflake (PREPROD)
         env:

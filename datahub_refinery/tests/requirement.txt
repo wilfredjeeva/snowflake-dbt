@@ -5,3 +5,4 @@ python-dotenv
 pandas
 snowflake-connector-python[pandas]
 cryptography
+openpyxl

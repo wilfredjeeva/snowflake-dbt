@@ -3,7 +3,7 @@
 # Trigger  : Manual only (workflow_dispatch).
 # Cleanup  : Delete this file once the permanent redesign is in place.
 
-name: TEMP - Full Deploy test → PREPROD
+name: TEMP - Full Deploy test -> PREPROD
 
 on:
   workflow_dispatch:

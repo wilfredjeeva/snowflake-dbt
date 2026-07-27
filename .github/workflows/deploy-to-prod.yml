@@ -14,7 +14,7 @@ jobs:
   prod_deploy_run:
     runs-on: ubuntu-latest
     environment: prod
-    timeout-minutes: 45
+    timeout-minutes: 360
 
     # Runs automatically on push to main (i.e. after a test-main PR is reviewed, approved, and merged).
     # The prod environment gate pauses the job until an approver confirms in GitHub Actions UI.
@@ -156,15 +156,16 @@ jobs:
 
       # -----------------------------------------------------------------------
       # PROD build mirrors the TEST/PREPROD build mode exactly:
-      #   selective → uses state:modified+ when manifest exists, or git-diff
-      #               model selection when no manifest is available, to always
-      #               keep selective builds truly selective (never fall back to full).
+      #   selective → state:modified.body+  runs models where SQL body changed + downstream
+      #               state:modified.macros+ runs models that depend on a changed macro + downstream
+      #               This prevents full builds: macro changes only rebuild affected models.
+      #               Falls back to git-diff model selectors if no manifest is available.
       #   full      → build all models (path:models+)
       # Note: --full-refresh is NOT used in selective mode to preserve
       # incremental model history. It IS used for full builds.
       # -----------------------------------------------------------------------
       - name: Build dbt models (mirrors TEST/PREPROD build mode)
-        timeout-minutes: 40
+        timeout-minutes: 340
         working-directory: datahub_refinery
         run: |
           BUILD_TYPE="${{ steps.build_scope.outputs.BUILD_TYPE }}"
@@ -174,15 +175,19 @@ jobs:
             echo "FULL build - all models (config/macro/workflow change, or fallback)"
             dbt build \
               --select "path:models+" \
+              --exclude "platinum_ai_mosaic_poc_temp_mosaicicssubgroupdetails platinum_ai_mosaic_poc_temp_mosaicicsworkflowendsteps platinum_ai_mosaic_poc_temp_mosaicicsworkflownextactions platinum_ai_mosaic_poc_temp_mosaicicsworkflowsteps platinum_ai_mosaic_poc_temp_mosaicorganisations platinum_ai_mosaic_poc_temp_mosaicworkers" \
+              --exclude "silver_Ezytreev_ordworks,test_name:expression_is_true" \
               --target prod \
               --no-fail-fast \
               --full-refresh \
               --profiles-dir .
 
           elif [ "$USE_STATE" == "true" ]; then
-            echo "SELECTIVE build - state:modified+ (changed + downstream only)"
+            echo "SELECTIVE build - state:modified.body+ state:modified.macros+ (SQL/macro changes + downstream only)"
             dbt build \
-              --select "state:modified+" \
+              --select "state:modified.body+ state:modified.macros+" \
+              --exclude "platinum_ai_mosaic_poc_temp_mosaicicssubgroupdetails platinum_ai_mosaic_poc_temp_mosaicicsworkflowendsteps platinum_ai_mosaic_poc_temp_mosaicicsworkflownextactions platinum_ai_mosaic_poc_temp_mosaicicsworkflowsteps platinum_ai_mosaic_poc_temp_mosaicorganisations platinum_ai_mosaic_poc_temp_mosaicworkers" \
+              --exclude "silver_Ezytreev_ordworks,test_name:expression_is_true" \
               --state ../previous-manifest/ \
               --target prod \
               --no-fail-fast \
@@ -191,44 +196,40 @@ jobs:
             if [ $DBT_EXIT -ne 0 ]; then
               exit $DBT_EXIT
             elif grep -q "Nothing to do" /tmp/selective_build.log; then
-              echo "state:modified+ found nothing to run (re-run scenario - manifest is from same commit)"
-              echo "Using git diff + macro selector to keep build selective"
+              echo "Selective build found nothing to run (re-run or YAML-only change scenario)"
+              echo "Falling back to git-diff model selector to stay selective"
               MODEL_SELECTORS=$(git diff --name-only HEAD~1 HEAD 2>/dev/null \
                 | grep -E '^datahub_refinery/models/.*\.sql$' \
-                | sed 's|^datahub_refinery/||;s|\.sql$||;s|$|+|' \
-                | tr '\n' ' ')
-              MACRO_SELECTORS=$(git diff --name-only HEAD~1 HEAD 2>/dev/null \
-                | grep -E '^datahub_refinery/macros/.*\.sql$' \
-                | sed 's|.*/||;s|\.sql$||' \
-                | awk '{print "macro:"$1"+"}' \
-                | tr '\n' ' ')
-              CHANGED_SELECTORS=$(echo "${MODEL_SELECTORS} ${MACRO_SELECTORS}" | xargs)
-              if [ -z "$CHANGED_SELECTORS" ]; then
-                echo "No model or macro changes found via git diff - nothing to build"
+                | sed 's|.*/||;s|\.sql$||;s|$|+|' \
+                | tr '\n' ' ' | xargs)
+              if [ -z "$MODEL_SELECTORS" ]; then
+                echo "No model SQL changes found - nothing to build (macro impact handled by state:modified.macros+)"
                 exit 0
               fi
-              echo "Git-derived selector: $CHANGED_SELECTORS"
-              dbt build --select $CHANGED_SELECTORS --target prod --no-fail-fast --profiles-dir .
+              echo "Git-derived model selector: $MODEL_SELECTORS"
+              dbt build --select $MODEL_SELECTORS \
+                --exclude "platinum_ai_mosaic_poc_temp_mosaicicssubgroupdetails platinum_ai_mosaic_poc_temp_mosaicicsworkflowendsteps platinum_ai_mosaic_poc_temp_mosaicicsworkflownextactions platinum_ai_mosaic_poc_temp_mosaicicsworkflowsteps platinum_ai_mosaic_poc_temp_mosaicorganisations platinum_ai_mosaic_poc_temp_mosaicworkers" \
+                --exclude "silver_Ezytreev_ordworks,test_name:expression_is_true" \
+                --target prod --no-fail-fast --profiles-dir .
             fi
 
           else
-            echo "No manifest available - using git diff + macro selector to stay selective"
+            echo "No manifest available - using git-diff model selector (no full build)"
+            # Note: macro:name+ is not a valid dbt selector. Macro impact is handled by
+            # state:modified.macros+ in the primary path once a manifest is available.
             MODEL_SELECTORS=$(git diff --name-only HEAD~1 HEAD 2>/dev/null \
               | grep -E '^datahub_refinery/models/.*\.sql$' \
-              | sed 's|^datahub_refinery/||;s|\.sql$||;s|$|+|' \
-              | tr '\n' ' ')
-            MACRO_SELECTORS=$(git diff --name-only HEAD~1 HEAD 2>/dev/null \
-              | grep -E '^datahub_refinery/macros/.*\.sql$' \
-              | sed 's|.*/||;s|\.sql$||' \
-              | awk '{print "macro:"$1"+"}' \
-              | tr '\n' ' ')
-            CHANGED_SELECTORS=$(echo "${MODEL_SELECTORS} ${MACRO_SELECTORS}" | xargs)
-            if [ -z "$CHANGED_SELECTORS" ]; then
-              echo "No model or macro changes found via git diff - nothing to build"
+              | sed 's|.*/||;s|\.sql$||;s|$|+|' \
+              | tr '\n' ' ' | xargs)
+            if [ -z "$MODEL_SELECTORS" ]; then
+              echo "No model SQL changes found via git diff - nothing to build"
               exit 0
             fi
-            echo "Git-derived selector: $CHANGED_SELECTORS"
-            dbt build --select $CHANGED_SELECTORS --target prod --no-fail-fast --profiles-dir .
+            echo "Git-derived model selector: $MODEL_SELECTORS"
+            dbt build --select $MODEL_SELECTORS \
+              --exclude "platinum_ai_mosaic_poc_temp_mosaicicssubgroupdetails platinum_ai_mosaic_poc_temp_mosaicicsworkflowendsteps platinum_ai_mosaic_poc_temp_mosaicicsworkflownextactions platinum_ai_mosaic_poc_temp_mosaicicsworkflowsteps platinum_ai_mosaic_poc_temp_mosaicorganisations platinum_ai_mosaic_poc_temp_mosaicworkers" \
+              --exclude "silver_Ezytreev_ordworks,test_name:expression_is_true" \
+              --target prod --no-fail-fast --profiles-dir .
           fi
 
       - name: Generate dbt test HTML report

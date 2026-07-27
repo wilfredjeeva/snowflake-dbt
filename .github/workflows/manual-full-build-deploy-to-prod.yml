@@ -1,9 +1,12 @@
-# TEMPORARY WORKFLOW - Full build of test branch -> PREPROD
-# Purpose  : One-shot deployment of everything currently on the test branch into PREPROD.
-# Trigger  : Manual only (workflow_dispatch).
-# Cleanup  : Delete this file once the permanent redesign is in place.
+# Manual full-build workflow - main branch -> PROD
+# Purpose  : One-shot full deployment of everything currently on the main branch into PROD.
+#             Use when a selective build is insufficient (e.g. first baseline build,
+#             major macro refactors, environment reset, or data recovery).
+# Trigger  : Manual only (workflow_dispatch). Disable this workflow when not needed;
+#             re-enable on demand from the GitHub Actions UI.
+# Branch   : Always runs against the latest HEAD of the main branch.
 
-name: TEMP - Full Deploy test -> PREPROD
+name: manual-full-build-deploy-to-prod
 
 on:
   workflow_dispatch:
@@ -17,19 +20,19 @@ env:
   DBT_PROJECT_OBJECT_NAME: datahub_refinery
 
 jobs:
-  full_deploy_preprod:
-    name: Full Deploy PREPROD (test branch)
+  full_deploy_prod:
+    name: Full Deploy PROD (main branch)
     runs-on: ubuntu-latest
-    environment: preprod
+    environment: prod
     # Full build across all models can easily exceed 2 hours.
     # Set to 360 min (6 h) to give ample headroom.
     timeout-minutes: 360
 
     steps:
-      # Checkout the latest HEAD of the test branch explicitly.
+      # Checkout the latest HEAD of the main branch explicitly.
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: test
+          ref: main
           fetch-depth: 0
 
       - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
@@ -60,12 +63,12 @@ jobs:
       - name: Install dbt packages
         run: |
           cd datahub_refinery
-          dbt deps --target preprod
+          dbt deps --target prod
 
-      # Write CI profiles.yml for PREPROD.
+      # Write CI profiles.yml for PROD.
       # client_session_keep_alive + heartbeat_frequency prevent the Snowflake
       # session from timing out during a long full build (> 2 h).
-      - name: Write CI profiles.yml (preprod)
+      - name: Write CI profiles.yml (prod)
         env:
           SF_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
           SF_USER: ${{ secrets.SNOWFLAKE_USER }}
@@ -79,9 +82,9 @@ jobs:
           import os, pathlib, json
           e = os.environ
           content = f"""datahub_refinery:
-            target: preprod
+            target: prod
             outputs:
-              preprod:
+              prod:
                 type: snowflake
                 account: {json.dumps(e['SF_ACCOUNT'])}
                 user: {json.dumps(e['SF_USER'])}
@@ -96,7 +99,7 @@ jobs:
                 client_session_keep_alive_heartbeat_frequency: 900
           """
           pathlib.Path("datahub_refinery/profiles.yml").write_text(content)
-          print("CI profiles.yml written for preprod.")
+          print("CI profiles.yml written for prod.")
           PYEOF
 
       # FULL build - selects every model in the project (path:models+).
@@ -104,23 +107,23 @@ jobs:
       # --no-fail-fast lets all models attempt to run before failing the job.
       #
       # Permanent excludes applied to every run:
-      #   1. path:models/platinum/al_mosaic_poc_temp
+      #   1. Specific platinum_ai_mosaic_poc_temp_* models
       #        POC/temp platinum models that fail column masking policy
       #        governance validation (at least one column must have a masking
       #        policy). Excluded until the models are production-ready.
       #   2. silver_Ezytreev_ordworks,test_name:expression_is_true
       #        Specific expression_is_true test on silver_Ezytreev_ordworks
-      #        that returns 8 failing rows. Excluded pending upstream data fix.
-      - name: Full dbt build - all models (test branch -> PREPROD)
+      #        that returns failing rows. Excluded pending upstream data fix.
+      - name: Full dbt build - all models (main branch -> PROD)
         timeout-minutes: 340
         working-directory: datahub_refinery
         run: |
-          echo "Starting FULL dbt build on PREPROD - $(date -u)"
+          echo "Starting FULL dbt build on PROD - $(date -u)"
           dbt build \
             --select "path:models+" \
             --exclude "platinum_ai_mosaic_poc_temp_mosaicicssubgroupdetails platinum_ai_mosaic_poc_temp_mosaicicsworkflowendsteps platinum_ai_mosaic_poc_temp_mosaicicsworkflownextactions platinum_ai_mosaic_poc_temp_mosaicicsworkflowsteps platinum_ai_mosaic_poc_temp_mosaicorganisations platinum_ai_mosaic_poc_temp_mosaicworkers" \
             --exclude "silver_Ezytreev_ordworks,test_name:expression_is_true" \
-            --target preprod \
+            --target prod \
             --no-fail-fast \
             --profiles-dir .
           echo "dbt build complete - $(date -u)"
@@ -133,15 +136,31 @@ jobs:
         if: always()
         uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
         with:
-          name: dbt_test_report_preprod_full
+          name: dbt_test_report_prod_full
           path: dbt_test_report.html
           if-no-files-found: warn
+
+      # Save the manifest from this full build to the PROD cache so the next
+      # selective build in the regular deploy-to-prod.yml workflow can use it
+      # for state comparison (state:modified.*+).
+      - name: Save manifest for next selective build
+        if: always()
+        run: |
+          mkdir -p previous-manifest
+          cp datahub_refinery/target/manifest.json previous-manifest/ 2>/dev/null || true
+
+      - name: Cache PROD manifest for next selective build
+        if: always()
+        uses: actions/cache/save@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
+        with:
+          path: previous-manifest/manifest.json
+          key: dbt-manifest-prod-${{ github.run_id }}
 
       - name: Upload dbt artifacts (manifest + run results)
         if: always()
         uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
         with:
-          name: dbt_artifacts_preprod_full
+          name: dbt_artifacts_prod_full
           path: |
             datahub_refinery/target/manifest.json
             datahub_refinery/target/run_results.json
@@ -157,7 +176,7 @@ jobs:
           rm -rf "$GITHUB_WORKSPACE/datahub_refinery/logs"
           echo "Cleaned target/ and logs/ - dbt_packages/ retained for deploy"
 
-      - name: Deploy dbt project object to Snowflake (PREPROD)
+      - name: Deploy dbt project object to Snowflake (PROD)
         env:
           PRIVATE_KEY_PASSPHRASE: ${{ secrets.SNOWFLAKE_KEY_PASSPHRASE }}
         run: |
@@ -175,8 +194,8 @@ jobs:
           private_key_path = "/home/runner/sf_key.p8"
           EOF
           chmod 0600 ~/.snowflake/config.toml
-          snow dbt deploy "PREPROD_DATATRANSFORMATIONS" \
+          snow dbt deploy "PROD_DATATRANSFORMATIONS" \
             --source "$GITHUB_WORKSPACE/datahub_refinery" \
             --profiles-dir "$GITHUB_WORKSPACE/datahub_refinery" \
-            --default-target preprod \
+            --default-target prod \
             --force

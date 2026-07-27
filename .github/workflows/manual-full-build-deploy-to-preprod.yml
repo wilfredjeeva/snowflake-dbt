@@ -1,9 +1,12 @@
-# TEMPORARY WORKFLOW - Full build of test branch -> PREPROD
-# Purpose  : One-shot deployment of everything currently on the test branch into PREPROD.
-# Trigger  : Manual only (workflow_dispatch).
-# Cleanup  : Delete this file once the permanent redesign is in place.
+# Manual full-build workflow - test branch -> PREPROD
+# Purpose  : One-shot full deployment of everything currently on the test branch into PREPROD.
+#             Use when a selective build is insufficient (e.g. first baseline build,
+#             major macro refactors, environment reset, or data recovery).
+# Trigger  : Manual only (workflow_dispatch). Disable this workflow when not needed;
+#             re-enable on demand from the GitHub Actions UI.
+# Branch   : Always runs against the latest HEAD of the test branch.
 
-name: TEMP - Full Deploy test -> PREPROD
+name: manual-full-build-deploy-to-preprod
 
 on:
   workflow_dispatch:
@@ -104,13 +107,13 @@ jobs:
       # --no-fail-fast lets all models attempt to run before failing the job.
       #
       # Permanent excludes applied to every run:
-      #   1. path:models/platinum/al_mosaic_poc_temp
+      #   1. Specific platinum_ai_mosaic_poc_temp_* models
       #        POC/temp platinum models that fail column masking policy
       #        governance validation (at least one column must have a masking
       #        policy). Excluded until the models are production-ready.
       #   2. silver_Ezytreev_ordworks,test_name:expression_is_true
       #        Specific expression_is_true test on silver_Ezytreev_ordworks
-      #        that returns 8 failing rows. Excluded pending upstream data fix.
+      #        that returns failing rows. Excluded pending upstream data fix.
       - name: Full dbt build - all models (test branch -> PREPROD)
         timeout-minutes: 340
         working-directory: datahub_refinery

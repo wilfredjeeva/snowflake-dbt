@@ -156,15 +156,15 @@ jobs:
 
       # -----------------------------------------------------------------------
       # PROD build mirrors the TEST/PREPROD build mode exactly:
-      #   selective → state:modified.body+  runs models where SQL body changed + downstream
-      #               state:modified.macros+ runs models that depend on a changed macro + downstream
-      #               This prevents full builds: macro changes only rebuild affected models.
+      #   selective → state:modified.body   runs only models where SQL body changed (no downstream cascade)
+      #               state:modified.macros  runs only models that directly depend on a changed macro
+      #               This prevents full builds and avoids expensive downstream cascade rebuilds.
       #               Falls back to git-diff model selectors if no manifest is available.
       #   full      → build all models (path:models+)
       # Note: --full-refresh is NOT used in selective mode to preserve
       # incremental model history. It IS used for full builds.
       # -----------------------------------------------------------------------
-      - name: Build dbt models (mirrors TEST/PREPROD build mode)
+      - name: Build dbt models (selective - direct changes only)
         timeout-minutes: 340
         working-directory: datahub_refinery
         run: |
@@ -183,9 +183,9 @@ jobs:
               --profiles-dir .
 
           elif [ "$USE_STATE" == "true" ]; then
-            echo "SELECTIVE build - state:modified.body+ state:modified.macros+ (SQL/macro changes + downstream only)"
+            echo "SELECTIVE build - state:modified.body state:modified.macros (direct changes only - no downstream cascade)"
             dbt build \
-              --select "state:modified.body+ state:modified.macros+" \
+              --select "state:modified.body state:modified.macros" \
               --exclude "platinum_ai_mosaic_poc_temp_mosaicicssubgroupdetails platinum_ai_mosaic_poc_temp_mosaicicsworkflowendsteps platinum_ai_mosaic_poc_temp_mosaicicsworkflownextactions platinum_ai_mosaic_poc_temp_mosaicicsworkflowsteps platinum_ai_mosaic_poc_temp_mosaicorganisations platinum_ai_mosaic_poc_temp_mosaicworkers" \
               --exclude "silver_Ezytreev_ordworks,test_name:expression_is_true" \
               --state ../previous-manifest/ \

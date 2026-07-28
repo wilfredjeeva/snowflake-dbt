@@ -117,7 +117,7 @@ jobs:
     name: Deploy TEST
     runs-on: ubuntu-latest
     environment: test
-    timeout-minutes: 150
+    timeout-minutes: 360
     needs: build
 
     outputs:
@@ -221,12 +221,12 @@ jobs:
           PYEOF
 
       # dbt build runs models AND tests together.
-      # Primary path  : state:modified.body+  → only models where SQL body changed + downstream
+      # Primary path  : state:modified.body   → only models where SQL body changed (no downstream cascade)
       #                 state:modified.macros+ → only models that depend on a changed macro + downstream
       # This prevents full builds: macro changes only rebuild affected models, not all 2800 objects.
       # Fallback path  : git-diff derived model selectors only (macro impact handled by primary path).
-      - name: Build changed dbt models (selective - changed + downstream only)
-        timeout-minutes: 130
+      - name: Build changed dbt models (selective - direct changes only)
+        timeout-minutes: 340
         working-directory: datahub_refinery
         run: |
           # Compute accurate git diff once (PR base→head for PR events, HEAD~1 for dispatch)
@@ -239,9 +239,9 @@ jobs:
           fi
 
           if [ "${{ steps.manifest_check.outputs.USE_STATE }}" == "true" ]; then
-            echo "SELECTIVE build - state:modified.body+ state:modified.macros+ (SQL/macro changes + downstream only)"
+            echo "SELECTIVE build - state:modified.body state:modified.macros (SQL/macro changes, direct only - no downstream cascade)"
             dbt build \
-              --select "state:modified.body+ state:modified.macros+" \
+              --select "state:modified.body state:modified.macros" \
               --state ../previous-manifest/ \
               --target test --no-fail-fast --profiles-dir . 2>&1 | tee /tmp/selective_build.log
             DBT_EXIT=${PIPESTATUS[0]}
@@ -354,7 +354,7 @@ jobs:
     name: Deploy PREPROD
     runs-on: ubuntu-latest
     environment: preprod
-    timeout-minutes: 150
+    timeout-minutes: 360
     needs: deploy_test
 
     outputs:
@@ -475,9 +475,9 @@ jobs:
             echo "USE_STATE=false" >> $GITHUB_OUTPUT
           fi
 
-      # Always selective - mirrors TEST. state:modified.body+ state:modified.macros+ prevents full builds.
-      - name: Build dbt models (selective - mirrors TEST)
-        timeout-minutes: 130
+      # Always selective - mirrors TEST. state:modified.body state:modified.macros prevents full builds.
+      - name: Build dbt models (selective - direct changes only)
+        timeout-minutes: 340
         working-directory: datahub_refinery
         run: |
           # Compute accurate git diff once (PR base→head for PR events, HEAD~1 for dispatch)
@@ -490,9 +490,9 @@ jobs:
           fi
 
           if [ "${{ steps.manifest_check.outputs.USE_STATE }}" == "true" ]; then
-            echo "SELECTIVE build - state:modified.body+ state:modified.macros+ (SQL/macro changes + downstream only)"
+            echo "SELECTIVE build - state:modified.body state:modified.macros (SQL/macro changes, direct only - no downstream cascade)"
             dbt build \
-              --select "state:modified.body+ state:modified.macros+" \
+              --select "state:modified.body state:modified.macros" \
               --exclude "platinum_ai_mosaic_poc_temp_mosaicicssubgroupdetails platinum_ai_mosaic_poc_temp_mosaicicsworkflowendsteps platinum_ai_mosaic_poc_temp_mosaicicsworkflownextactions platinum_ai_mosaic_poc_temp_mosaicicsworkflowsteps platinum_ai_mosaic_poc_temp_mosaicorganisations platinum_ai_mosaic_poc_temp_mosaicworkers" \
               --exclude "silver_Ezytreev_ordworks,test_name:expression_is_true" \
               --state ../previous-manifest/ \

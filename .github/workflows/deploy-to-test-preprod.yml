@@ -239,9 +239,9 @@ jobs:
           fi
 
           if [ "${{ steps.manifest_check.outputs.USE_STATE }}" == "true" ]; then
-            echo "SELECTIVE build - state:modified.body state:modified.macros (SQL/macro changes, direct only - no downstream cascade)"
+            echo "SELECTIVE build - state:modified.body state:modified.macros (SQL/macro changes + new models/tests, direct only - no downstream cascade)"
             dbt build \
-              --select "state:modified.body state:modified.macros" \
+              --select "state:modified.body state:modified.macros state:new" \
               --state ../previous-manifest/ \
               --target test --no-fail-fast --profiles-dir . 2>&1 | tee /tmp/selective_build.log
             DBT_EXIT=${PIPESTATUS[0]}
@@ -490,9 +490,9 @@ jobs:
           fi
 
           if [ "${{ steps.manifest_check.outputs.USE_STATE }}" == "true" ]; then
-            echo "SELECTIVE build - state:modified.body state:modified.macros (SQL/macro changes, direct only - no downstream cascade)"
+            echo "SELECTIVE build - state:modified.body state:modified.macros (SQL/macro changes + new models/tests, direct only - no downstream cascade)"
             dbt build \
-              --select "state:modified.body state:modified.macros" \
+              --select "state:modified.body state:modified.macros state:new" \
               --exclude "platinum_ai_mosaic_poc_temp_mosaicicssubgroupdetails platinum_ai_mosaic_poc_temp_mosaicicsworkflowendsteps platinum_ai_mosaic_poc_temp_mosaicicsworkflownextactions platinum_ai_mosaic_poc_temp_mosaicicsworkflowsteps platinum_ai_mosaic_poc_temp_mosaicorganisations platinum_ai_mosaic_poc_temp_mosaicworkers" \
               --exclude "silver_Ezytreev_ordworks,test_name:expression_is_true" \
               --state ../previous-manifest/ \

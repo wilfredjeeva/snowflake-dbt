@@ -183,9 +183,9 @@ jobs:
               --profiles-dir .
 
           elif [ "$USE_STATE" == "true" ]; then
-            echo "SELECTIVE build - state:modified.body state:modified.macros (direct changes only - no downstream cascade)"
+            echo "SELECTIVE build - state:modified.body state:modified.macros state:new (direct changes + new models/tests - no downstream cascade)"
             dbt build \
-              --select "state:modified.body state:modified.macros" \
+              --select "state:modified.body state:modified.macros state:new" \
               --exclude "platinum_ai_mosaic_poc_temp_mosaicicssubgroupdetails platinum_ai_mosaic_poc_temp_mosaicicsworkflowendsteps platinum_ai_mosaic_poc_temp_mosaicicsworkflownextactions platinum_ai_mosaic_poc_temp_mosaicicsworkflowsteps platinum_ai_mosaic_poc_temp_mosaicorganisations platinum_ai_mosaic_poc_temp_mosaicworkers" \
               --exclude "silver_Ezytreev_ordworks,test_name:expression_is_true" \
               --state ../previous-manifest/ \

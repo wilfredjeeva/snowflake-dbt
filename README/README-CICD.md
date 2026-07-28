@@ -1,238 +1,247 @@
-# snowflake-dbt CI/CD (dbt on Snowflake)
+# snowflake-dbt CI/CD
 
-This repository implements a multi-environment CI/CD pattern for dbt on Snowflake:
+This repository implements a multi-environment CI/CD pipeline for dbt on Snowflake using GitHub Actions.
 
-- **feature/*** → Deploy+Run to **DEV**
-- **test** → Deploy+Run to **TEST**
-- After TEST success → Deploy+Run to **PREPROD** (approval gate via GitHub Environment)
-- After PREPROD success → auto-PR **test → pre-prod**
-- **pre-prod** → Deploy-only to **PROD** (approval gate via GitHub Environment)
-- After PROD success → auto-PR **pre-prod → main**
-- PROD execution is performed by **ADF** (Snowflake Script activity calling EXECUTE DBT PROJECT)
+---
+
+## Branching Strategy
+
+```
+feature/*  ──PR──►  test  ──PR──►  main
+                      │               │
+                   TEST +          PROD
+                  PREPROD
+```
+
+| Branch | Deploys to | Trigger |
+|---|---|---|
+| `feature/*` | — | PR validation only (`pr-build-validate.yml`) |
+| `test` | TEST → PREPROD | Push / merge to `test` |
+| `main` | PROD | Push / merge to `main` (via test→main PR) |
+
+---
+
+## Workflow Files
+
+| File | Purpose | Trigger |
+|---|---|---|
+| `pr-build-validate.yml` | dbt compile + lint on every PR | `pull_request` to `test` or `main` |
+| `deploy-to-test-preprod.yml` | Selective dbt build → TEST, then PREPROD (approval gate) | Push to `test` |
+| `deploy-to-prod.yml` | Selective dbt build → PROD (approval gate) | Push to `main` |
+| `manual-full-build-deploy-to-test.yml` | Full build of `test` branch → TEST | `workflow_dispatch` only |
+| `manual-full-build-deploy-to-preprod.yml` | Full build of `test` branch → PREPROD | `workflow_dispatch` only |
+| `manual-full-build-deploy-to-prod.yml` | Full build of `main` branch → PROD | `workflow_dispatch` only |
+
+> **Manual full-build workflows** are disabled by default. Enable them from the GitHub Actions UI when a full baseline rebuild is needed (e.g. first-ever environment setup, environment reset, major macro refactor). After the run completes, disable again. The resulting manifest is saved to cache so the next automated selective build can do accurate state comparison.
+
+---
+
+## Selective Build Approach
+
+All automated deployment workflows use **selective builds** — only the models that directly changed are built and tested. No downstream cascade.
+
+### How it works
+
+```
+dbt build
+  --select "state:modified.body state:modified.macros"
+  --state  ./previous-manifest/
+```
+
+| Selector | What it builds |
+|---|---|
+| `state:modified.body` | Models whose SQL body changed vs. the previous manifest |
+| `state:modified.macros` | Models whose compiled output changed due to a macro change |
+
+> **No `+` suffix** — downstream models are NOT automatically rebuilt. This prevents a single bronze model change from cascading to rebuild 500+ models. PREPROD and PROD also follow the same approach.
+
+### Build types
+
+The pipeline supports two build modes, determined by the PR title prefix:
+
+| PR title prefix | Build type | What runs |
+|---|---|---|
+| `[promote]` | **selective** | `state:modified.body state:modified.macros` |
+| `[full-build]` | **full** | `path:models+` (all models, with `--full-refresh`) |
+
+When no prefix matches, the pipeline defaults to **selective**.
+
+### Manifest caching
+
+After each successful build, the `manifest.json` is saved to GitHub Actions cache keyed by `run_id`. The next selective build restores the most recent manifest to compare against, enabling accurate `state:modified` detection.
+
+If no manifest is found in cache, the pipeline falls back to a **git-diff selector** — extracting changed `.sql` filenames and building those models directly (still selective, not a full build).
+
+### Permanent excludes
+
+Applied on every build (selective and full) across all environments:
+
+| Exclude | Reason |
+|---|---|
+| `platinum_ai_mosaic_poc_temp_mosaicicssubgroupdetails`<br>`platinum_ai_mosaic_poc_temp_mosaicicsworkflowendsteps`<br>`platinum_ai_mosaic_poc_temp_mosaicicsworkflownextactions`<br>`platinum_ai_mosaic_poc_temp_mosaicicsworkflowsteps`<br>`platinum_ai_mosaic_poc_temp_mosaicorganisations`<br>`platinum_ai_mosaic_poc_temp_mosaicworkers` | POC/temp platinum models — fail column masking policy governance validation. Excluded until production-ready. |
+| `silver_Ezytreev_ordworks,test_name:expression_is_true` | `expression_is_true` test returns failing rows pending upstream data fix. |
+
+---
+
+## Pipeline Flow
+
+### TEST + PREPROD (`deploy-to-test-preprod.yml`)
+
+```
+Push to test
+    │
+    ▼
+[build job]
+  dbt parse / compile
+  Determine build type (selective / full) from PR title
+    │
+    ▼
+[deploy_test job]  ── environment: test (no approval)
+  Restore manifest from cache
+  dbt build (selective or full)
+  Save manifest to cache
+  snow dbt deploy → TEST_DATATRANSFORMATIONS
+    │
+    ▼
+[deploy_preprod job]  ── environment: preprod (approval required)
+  Restore manifest from cache
+  dbt build (selective or full, mirrors TEST)
+  Save manifest to cache
+  snow dbt deploy → PREPROD_DATATRANSFORMATIONS
+```
+
+### PROD (`deploy-to-prod.yml`)
+
+```
+Push to main (via [promote] PR from test)
+    │
+    ▼
+[prod_deploy_run job]  ── environment: prod (approval required)
+  Download build type from unified pipeline artifact
+  Restore PROD manifest from cache
+  dbt build (selective or full, mirrors TEST/PREPROD)
+  Save PROD manifest to cache
+  snow dbt deploy → PROD_DATATRANSFORMATIONS
+```
+
+---
+
+## Timeouts
+
+| Scope | Timeout |
+|---|---|
+| `deploy_test` job | 360 min |
+| `deploy_preprod` job | 360 min |
+| `prod_deploy_run` job | 360 min |
+| dbt build step (all environments) | 340 min |
+| Manual full-build job + step | 360 / 340 min |
+
+---
 
 ## Project Structure
 
-The dbt project root is in the `datahub_refinery/` directory, which contains:
-- `dbt_project.yml` - dbt project configuration
-- `profiles.yml` - Snowflake connection profiles
-- `packages.yml` - dbt package dependencies
-- `models/` - dbt models organized by layer
-- `macros/` - custom dbt macros
-- `seeds/` - seed data files
-- `snapshots/` - snapshot models
-- `tests/` - custom data tests
-
-## CI/CD Tools
-
-Workflows use:
-- **Snowflake CLI** (`snow`) - Deploys and executes dbt projects in Snowflake
-- **dbt Core + dbt-snowflake** - Installed on GitHub Actions runner
-- **Key-pair authentication** - Via `SNOWFLAKE_PRIVATE_KEY_B64` stored in GitHub Environments
-
-## Prerequisites
-
-### 1. Snowflake Setup
-
-Create the required databases for each environment:
-
-```sql
--- DEV Environment
-CREATE DATABASE IF NOT EXISTS DEV_LANDING_ADF;
-CREATE DATABASE IF NOT EXISTS DEV_BRONZE_ADF;
-CREATE DATABASE IF NOT EXISTS DEV_SILVER;
-CREATE DATABASE IF NOT EXISTS DEV_GOLD;
-CREATE DATABASE IF NOT EXISTS DEV_PLATINUM;
-
--- TEST Environment
-CREATE DATABASE IF NOT EXISTS TEST_LANDING_ADF;
-CREATE DATABASE IF NOT EXISTS TEST_BRONZE_ADF;
-CREATE DATABASE IF NOT EXISTS TEST_SILVER;
-CREATE DATABASE IF NOT EXISTS TEST_GOLD;
-CREATE DATABASE IF NOT EXISTS TEST_PLATINUM;
-
--- PREPROD Environment
-CREATE DATABASE IF NOT EXISTS PREPROD_LANDING_ADF;
-CREATE DATABASE IF NOT EXISTS PREPROD_BRONZE_ADF;
-CREATE DATABASE IF NOT EXISTS PREPROD_SILVER;
-CREATE DATABASE IF NOT EXISTS PREPROD_GOLD;
-CREATE DATABASE IF NOT EXISTS PREPROD_PLATINUM;
-
--- PROD Environment
-CREATE DATABASE IF NOT EXISTS PROD_LANDING_ADF;
-CREATE DATABASE IF NOT EXISTS PROD_BRONZE_ADF;
-CREATE DATABASE IF NOT EXISTS PROD_SILVER;
-CREATE DATABASE IF NOT EXISTS PROD_GOLD;
-CREATE DATABASE IF NOT EXISTS PROD_PLATINUM;
-
--- Central dbt project store
-CREATE DATABASE IF NOT EXISTS DBTCENTRAL;
-CREATE SCHEMA IF NOT EXISTS DBTCENTRAL.DEV_DBTPROJECTNAME;
-CREATE SCHEMA IF NOT EXISTS DBTCENTRAL.TEST_DBTPROJECTNAME;
-CREATE SCHEMA IF NOT EXISTS DBTCENTRAL.PREPROD_DBTPROJECTNAME;
-CREATE SCHEMA IF NOT EXISTS DBTCENTRAL.PROD_DBTPROJECTNAME;
+```
+snowflake-dbt/
+├── .github/workflows/          GitHub Actions workflows
+├── datahub_refinery/           dbt project root
+│   ├── dbt_project.yml         dbt project configuration
+│   ├── profiles.yml            Snowflake connection profiles
+│   ├── packages.yml            dbt package dependencies
+│   ├── models/                 dbt models (bronze_adf, silver, gold, platinum)
+│   ├── macros/                 custom dbt macros
+│   ├── seeds/                  seed data files
+│   ├── snapshots/              snapshot models
+│   └── tests/                  custom data tests
+├── scripts/
+│   ├── validate_metadata.py    governance metadata validator (tags, owner, classification)
+│   └── dbt_report.py           generates HTML test report from run_results.json
+└── README/                     documentation
 ```
 
-### 2. Landing Schemas and Tables
+---
 
-For each environment, create the necessary landing schemas and source tables.
+## Database-per-Layer Architecture
 
-Example for DEV:
-```sql
-CREATE SCHEMA IF NOT EXISTS DEV_LANDING_ADF.AIRBNB;
-GRANT ALL PRIVILEGES ON SCHEMA DEV_LANDING_ADF.AIRBNB TO ROLE DBT_DEV_ROLE;
+Each environment follows this pattern:
 
--- Create landing tables (customize based on your data sources)
--- See snowflake_sql/elt_pipeline/2-landing-gold-tables.sql for examples
-```
+| Layer | Database pattern |
+|---|---|
+| Landing | `<ENV>_LANDING_ADF` |
+| Bronze | `<ENV>_BRONZE_ADF` |
+| Silver | `<ENV>_SILVER` |
+| Gold | `<ENV>_GOLD` |
+| Platinum | `<ENV>_PLATINUM` |
 
-### 3. Roles and Permissions
+Where `<ENV>` is `TEST`, `PREPROD`, or `PROD`.
 
-Example for DEV environment:
-```sql
-CREATE WAREHOUSE IF NOT EXISTS DBT_DEV_WH WAREHOUSE_SIZE='XSMALL' AUTO_SUSPEND=60 INITIALLY_SUSPENDED=TRUE;
-CREATE ROLE IF NOT EXISTS DBT_DEV_ROLE;
+The `generate_schema_name` macro enforces that the schema = the 2nd folder name under `models/` (e.g. `models/bronze_adf/airbnb/` → schema `AIRBNB`).
 
-GRANT USAGE ON WAREHOUSE DBT_DEV_WH TO ROLE DBT_DEV_ROLE;
-
--- Grant database permissions
-GRANT USAGE, CREATE SCHEMA ON DATABASE DEV_LANDING_ADF TO ROLE DBT_DEV_ROLE;
-GRANT USAGE, CREATE SCHEMA ON DATABASE DEV_BRONZE_ADF TO ROLE DBT_DEV_ROLE;
-GRANT USAGE, CREATE SCHEMA ON DATABASE DEV_SILVER TO ROLE DBT_DEV_ROLE;
-GRANT USAGE, CREATE SCHEMA ON DATABASE DEV_GOLD TO ROLE DBT_DEV_ROLE;
-GRANT USAGE, CREATE SCHEMA ON DATABASE DEV_PLATINUM TO ROLE DBT_DEV_ROLE;
-GRANT USAGE ON DATABASE DBTCENTRAL TO ROLE DBT_DEV_ROLE;
-GRANT ALL PRIVILEGES ON SCHEMA DBTCENTRAL.DEV_DBTPROJECTNAME TO ROLE DBT_DEV_ROLE;
-
--- Create CI/CD user
-CREATE USER IF NOT EXISTS GHA_DBT_DEV
-  DEFAULT_ROLE=DBT_DEV_ROLE
-  DEFAULT_WAREHOUSE=DBT_DEV_WH
-  DEFAULT_NAMESPACE=DBTCENTRAL.DEV_DBTPROJECTNAME
-  MUST_CHANGE_PASSWORD=FALSE;
-
-GRANT ROLE DBT_DEV_ROLE TO USER GHA_DBT_DEV;
-```
-
-Repeat similar setup for TEST, PREPROD, and PROD environments.
+---
 
 ## GitHub Configuration
 
-### 1. GitHub Environments
+### Environments
 
-Create four GitHub Environments with the following configuration:
-- **dev** - No approvers required
-- **test** - No approvers required
-- **preprod** - Require reviewers
-- **prod** - Require reviewers
+| Environment | Approval required |
+|---|---|
+| `test` | No |
+| `preprod` | Yes — set reviewers under Settings → Environments |
+| `prod` | Yes — set reviewers under Settings → Environments |
 
-### 2. Environment Secrets
+### Secrets (per environment)
 
-Configure these secrets for **each environment** (dev, test, preprod, prod):
+| Secret | Description |
+|---|---|
+| `SNOWFLAKE_ACCOUNT` | Snowflake account identifier |
+| `SNOWFLAKE_USER` | Service account username |
+| `SNOWFLAKE_ROLE` | Role for the user |
+| `SNOWFLAKE_WAREHOUSE` | Warehouse to use |
+| `SNOWFLAKE_DB` | Target database (e.g. `TEST_SILVER`) |
+| `SNOWFLAKE_SCHEMA` | Default schema |
+| `SNOWFLAKE_PRIVATE_KEY` | PEM-encoded RSA private key (not base64) |
+| `SNOWFLAKE_KEY_PASSPHRASE` | RSA key passphrase (if encrypted) |
+| `SNOWFLAKE_DBT_DATABASE` | dbt project store database (e.g. `DBTCENTRAL`) |
+| `SNOWFLAKE_DBT_SCHEMA` | dbt project store schema (e.g. `TEST_DATATRANSFORMATIONS`) |
 
-| Secret Name | Description | Example |
-|-------------|-------------|---------|
-| `SNOWFLAKE_ACCOUNT` | Snowflake account identifier | `abc12345.us-east-1` |
-| `SNOWFLAKE_USER` | Service account username | `GHA_DBT_DEV` |
-| `SNOWFLAKE_ROLE` | Role for the user | `DBT_DEV_ROLE` |
-| `SNOWFLAKE_WAREHOUSE` | Warehouse to use | `DBT_DEV_WH` |
-| `SNOWFLAKE_PROJECT_DB` | Always `DBTCENTRAL` | `DBTCENTRAL` |
-| `SNOWFLAKE_PROJECT_SCHEMA` | Environment-specific schema | `DEV_DBTPROJECTNAME` |
-| `SNOWFLAKE_PRIVATE_KEY_B64` | Base64-encoded RSA private key | `<base64 string>` |
+---
 
-### 3. Generate RSA Key Pair
+## Governance Validation
 
-```bash
-# Generate private key
-openssl genrsa -out rsa_key.pem 2048
+Every workflow runs `scripts/validate_metadata.py` before any dbt build. This script enforces that every model YAML has:
+- `tags:` — at least one tag
+- `owner:` — model owner defined in `meta:`
+- `classification:` — data classification defined in `meta:`
 
-# Generate public key
-openssl rsa -in rsa_key.pem -pubout -out rsa_key.pub
+Builds are blocked if any model fails governance validation.
 
-# Base64 encode the private key for GitHub secret
-cat rsa_key.pem | base64 -w 0 > rsa_key_b64.txt
-```
-
-Add the public key to your Snowflake user:
-```sql
-ALTER USER GHA_DBT_DEV SET RSA_PUBLIC_KEY='<paste public key here without headers>';
-```
-
-Store the base64-encoded private key in the `SNOWFLAKE_PRIVATE_KEY_B64` secret.
-
-## dbt Naming Standard
-
-### Database-per-layer Architecture
-
-Each environment follows this pattern:
-- `<ENV>_LANDING_ADF` - Raw data ingestion layer
-- `<ENV>_BRONZE_ADF` - Initial transformation layer
-- `<ENV>_SILVER` - Cleansed and conformed layer
-- `<ENV>_GOLD` - Business logic layer
-- `<ENV>_PLATINUM` - Aggregated marts layer
-
-### Folder Structure
-
-Models are organized by layer:
-```
-datahub_refinery/models/
-├── bronze_adf/
-│   └── airbnb/
-│       ├── _airbnb_bronze_sources.yml
-│       ├── airbnb_bronze_drivers.sql
-│       ├── airbnb_bronze_listings.sql
-│       └── airbnb_bronze_reviews.sql
-├── gold/
-│   └── airbnb/
-│       ├── _airbnb_gold_sources.yml
-│       ├── airbnb_gold_dim_listing_details.sql
-│       └── airbnb_gold_fact_listings.sql
-└── ...
-```
-
-The custom macro `macros/generate_schema_name.sql` enforces that **schema = 2nd folder name** (e.g., `models/bronze_adf/airbnb/` → schema `AIRBNB`).
-
-## Workflow Details
-
-### Workflow Files
-
-All workflow files are in `.github/workflows/`:
-- `dev-deploy.yml` - Triggered on push to `feature/**` branches
-- `test-deploy.yml` - Triggered on push to `test` branch
-- `preprod-deploy.yml` - Triggered after successful TEST deployment
-- `prod-deploy.yml` - Triggered on push to `pre-prod` branch
-
-### Common Workflow Steps
-
-1. **Checkout code** - Clone the repository
-2. **Setup Python** - Install Python 3.11
-3. **Install dependencies** - Snowflake CLI, dbt Core, dbt-snowflake
-4. **Configure Snowflake connection** - Write private key and create config.toml
-5. **Install dbt packages** - Run `dbt deps`
-6. **Deploy dbt project** - Upload to Snowflake using `snow dbt deploy`
-7. **Execute dbt build** - Run models using `snow dbt execute`
+---
 
 ## Troubleshooting
 
-### Issue: "No such option: -c"
+### Selective build rebuilds too many models
 
-**Cause**: The `-c` flag is not a valid option for `snow dbt` subcommands.
+**Cause:** The manifest in cache is stale (old run) or no manifest was found, causing git-diff fallback.
 
-**Solution**: Remove `-c ci` from commands. The default connection is automatically used when configured in `~/.snowflake/config.toml`.
+**Solution:** If the git-diff fallback selector produces more models than expected, check whether a widely-used source YAML file was modified (source changes can cascade). For a full baseline reset, run the manual full-build workflow.
 
-### Issue: "dbt_project.yml does not exist"
+### "Nothing to do" on selective build
 
-**Cause**: The `--source` path is incorrect.
+**Cause:** The changed files are YAML-only (schema, descriptions, tests) with no SQL body changes. The `state:modified.body` selector correctly finds nothing.
 
-**Solution**: Ensure workflows use `--source datahub_refinery` to point to the correct dbt project directory.
+**Solution:** This is expected behaviour. The pipeline falls back to the git-diff selector automatically. If the git-diff also finds no `.sql` files changed, the build exits cleanly.
 
-### Issue: "Schema does not exist or not authorized"
+### "Does not match any enabled nodes"
 
-**Cause**: Landing schemas and/or source tables haven't been created in Snowflake.
+**Cause:** A model name in the `--select` or `--exclude` flag doesn't exist in the current project (renamed, deleted, or path issue).
 
-**Solution**: Create the required schemas and tables in Snowflake before running dbt build. See the Prerequisites section above.
+**Solution:** Verify the model name matches exactly (case-sensitive). Check that `dbt_project.yml` `model-paths` is set to `["models"]`.
 
-### Issue: "The selection criterion 'path:models+' does not match any enabled nodes"
+### Manual full-build workflow — when to use
 
-**Cause**: dbt cannot find any models in the expected location.
+Use the manual full-build workflows when:
+- Setting up a new environment from scratch
+- After a long period of selective-only builds and data drift is suspected
+- After a major macro refactor that affects many models
+- Recovering from a corrupted environment
 
-**Solution**: Verify that `dbt_project.yml` is in the same directory as the `models/` folder (should be `datahub_refinery/`).
+Enable from GitHub Actions → select workflow → Enable workflow. Disable again after the run completes.

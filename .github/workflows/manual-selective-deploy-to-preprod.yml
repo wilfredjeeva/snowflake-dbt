@@ -1,0 +1,216 @@
+# Manual selective deploy workflow - specific models -> PREPROD
+# Purpose  : Deploy a specific set of dbt models from any branch directly to PREPROD
+#             without a full build. Use when an urgent or targeted deployment to PREPROD
+#             is needed outside of the normal automated TEST->PREPROD pipeline.
+# Trigger  : Manual only (workflow_dispatch).
+# Branch   : Configurable via input - can be any branch (feature branch, test, etc.).
+# Selector : Any valid dbt selector expression.
+#             Examples:
+#               path:models/silver/      - all models under a specific layer folder
+#               model_name_A model_name_B - specific named models
+#               tag:my_tag               - all models with a specific tag
+
+name: manual-selective-deploy-to-preprod
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Branch to deploy from (e.g. test, feature/my-branch)"
+        required: true
+        default: "test"
+      dbt_selector:
+        description: >
+          dbt --select expression. Examples:
+          'path:models/silver/' | 'path:models/bronze/airbnb/' |
+          'model_name_A model_name_B' | 'tag:my_tag'
+        required: true
+      reason:
+        description: "Reason for this targeted deploy (for audit trail)"
+        required: false
+        default: ""
+
+permissions:
+  id-token: write
+  contents: read
+  actions: read
+
+jobs:
+  selective_deploy_preprod:
+    name: "Selective deploy to PREPROD  [${{ inputs.dbt_selector }}]"
+    runs-on: ubuntu-latest
+    environment: preprod
+    timeout-minutes: 360
+
+    steps:
+      - name: Log deploy parameters
+        run: |
+          echo "=================================================="
+          echo "  SELECTIVE PREPROD DEPLOY"
+          echo "  Branch   : ${{ inputs.branch }}"
+          echo "  Selector : ${{ inputs.dbt_selector }}"
+          echo "  Reason   : ${{ inputs.reason }}"
+          echo "  Run ID   : ${{ github.run_id }}"
+          echo "  Triggered: ${{ github.actor }} @ $(date -u)"
+          echo "=================================================="
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.branch }}
+          fetch-depth: 0
+
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip dependencies
+        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-dbt-${{ hashFiles('**/packages.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-dbt-
+
+      - name: Install dbt and Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install dbt-core==1.9.4 dbt-snowflake==1.9.2 pyyaml "snowflake-cli==3.13.1"
+
+      - name: Write Snowflake private key
+        run: |
+          printf '%s' "${{ secrets.SNOWFLAKE_PRIVATE_KEY }}" > $HOME/sf_key.p8
+          chmod 600 $HOME/sf_key.p8
+
+      - name: Validate governance metadata (tags, owner, classification)
+        run: python scripts/validate_metadata.py
+
+      - name: Install dbt packages
+        run: |
+          cd datahub_refinery
+          dbt deps --target preprod
+
+      - name: Write CI profiles.yml (preprod)
+        env:
+          SF_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SF_USER: ${{ secrets.SNOWFLAKE_USER }}
+          SF_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
+          SF_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+          SF_DB: ${{ secrets.SNOWFLAKE_DB }}
+          SF_SCHEMA: ${{ secrets.SNOWFLAKE_SCHEMA }}
+          SF_PASSPHRASE: ${{ secrets.SNOWFLAKE_KEY_PASSPHRASE }}
+        run: |
+          python3 - << 'PYEOF'
+          import os, pathlib, json
+          e = os.environ
+          content = f"""datahub_refinery:
+            target: preprod
+            outputs:
+              preprod:
+                type: snowflake
+                account: {json.dumps(e['SF_ACCOUNT'])}
+                user: {json.dumps(e['SF_USER'])}
+                role: {json.dumps(e['SF_ROLE'])}
+                warehouse: {json.dumps(e['SF_WAREHOUSE'])}
+                database: {json.dumps(e['SF_DB'])}
+                schema: {json.dumps(e['SF_SCHEMA'])}
+                private_key_path: "/home/runner/sf_key.p8"
+                private_key_passphrase: {json.dumps(e['SF_PASSPHRASE'])}
+                threads: 8
+                client_session_keep_alive: true
+                client_session_keep_alive_heartbeat_frequency: 900
+          """
+          pathlib.Path("datahub_refinery/profiles.yml").write_text(content)
+          print("CI profiles.yml written for preprod.")
+          PYEOF
+
+      # Targeted build - builds ONLY the models specified in the selector input.
+      # No state comparison (explicit selector overrides state-based detection).
+      # Permanent excludes still applied for governance.
+      #
+      # Permanent excludes:
+      #   1. platinum_ai_mosaic_poc_temp_* models - fail column masking policy governance
+      #   2. silver_Ezytreev_ordworks,test_name:expression_is_true - pending upstream data fix
+      - name: "dbt build (selective) to PREPROD  [${{ inputs.dbt_selector }}]"
+        timeout-minutes: 340
+        working-directory: datahub_refinery
+        run: |
+          echo "Starting targeted PREPROD build - $(date -u)"
+          echo "Branch   : ${{ inputs.branch }}"
+          echo "Selector : ${{ inputs.dbt_selector }}"
+          dbt build \
+            --select "${{ inputs.dbt_selector }}" \
+            --exclude "platinum_ai_mosaic_poc_temp_mosaicicssubgroupdetails platinum_ai_mosaic_poc_temp_mosaicicsworkflowendsteps platinum_ai_mosaic_poc_temp_mosaicicsworkflownextactions platinum_ai_mosaic_poc_temp_mosaicicsworkflowsteps platinum_ai_mosaic_poc_temp_mosaicorganisations platinum_ai_mosaic_poc_temp_mosaicworkers" \
+            --exclude "silver_Ezytreev_ordworks,test_name:expression_is_true" \
+            --target preprod \
+            --no-fail-fast \
+            --profiles-dir .
+          echo "dbt build complete - $(date -u)"
+
+      - name: Generate dbt test HTML report
+        if: always()
+        run: python scripts/dbt_report.py
+
+      - name: Upload dbt test report
+        if: always()
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
+        with:
+          name: "dbt_report_preprod_selective_${{ github.run_id }}"
+          path: dbt_test_report.html
+          if-no-files-found: warn
+
+      # Save the manifest from this targeted build as the new PREPROD baseline.
+      # This ensures the next automated selective build (from deploy-to-test-preprod.yml)
+      # has an up-to-date PREPROD manifest to compare against.
+      - name: Save manifest as new PREPROD baseline
+        if: always()
+        run: |
+          mkdir -p previous-manifest
+          cp datahub_refinery/target/manifest.json previous-manifest/ 2>/dev/null || true
+
+      - name: Cache PREPROD manifest for next selective build
+        if: always()
+        uses: actions/cache/save@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
+        with:
+          path: previous-manifest/manifest.json
+          key: dbt-manifest-preprod-${{ github.run_id }}
+
+      - name: Upload dbt artifacts (manifest + run results)
+        if: always()
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
+        with:
+          name: "dbt_artifacts_preprod_selective_${{ github.run_id }}"
+          path: |
+            datahub_refinery/target/manifest.json
+            datahub_refinery/target/run_results.json
+          if-no-files-found: ignore
+          retention-days: 15
+
+      - name: Clean dbt artifacts before Snowflake deploy
+        run: |
+          rm -rf "$GITHUB_WORKSPACE/datahub_refinery/target"
+          rm -rf "$GITHUB_WORKSPACE/datahub_refinery/logs"
+          echo "Cleaned target/ and logs/ - dbt_packages/ retained for deploy"
+
+      - name: Deploy dbt project object to Snowflake (PREPROD)
+        env:
+          PRIVATE_KEY_PASSPHRASE: ${{ secrets.SNOWFLAKE_KEY_PASSPHRASE }}
+        run: |
+          mkdir -p ~/.snowflake
+          cat > ~/.snowflake/config.toml <<'EOF'
+          default_connection_name = "ci"
+          [connections.ci]
+          account = "${{ secrets.SNOWFLAKE_ACCOUNT }}"
+          user = "${{ secrets.SNOWFLAKE_USER }}"
+          role = "${{ secrets.SNOWFLAKE_ROLE }}"
+          warehouse = "${{ secrets.SNOWFLAKE_WAREHOUSE }}"
+          database = "${{ secrets.SNOWFLAKE_DBT_DATABASE }}"
+          schema = "${{ secrets.SNOWFLAKE_DBT_SCHEMA }}"
+          authenticator = "SNOWFLAKE_JWT"
+          private_key_path = "/home/runner/sf_key.p8"
+          EOF
+          chmod 0600 ~/.snowflake/config.toml
+          snow dbt deploy "PREPROD_DATATRANSFORMATIONS" \
+            --source "$GITHUB_WORKSPACE/datahub_refinery" \
+            --profiles-dir "$GITHUB_WORKSPACE/datahub_refinery" \
+            --default-target preprod \
+            --force

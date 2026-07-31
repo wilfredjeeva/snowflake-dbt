@@ -31,6 +31,7 @@ feature/*  ──PR──►  test  ──PR──►  main
 | `manual-full-build-deploy-to-test.yml` | Full build of `test` branch → TEST | `workflow_dispatch` only |
 | `manual-full-build-deploy-to-preprod.yml` | Full build of `test` branch → PREPROD | `workflow_dispatch` only |
 | `manual-full-build-deploy-to-prod.yml` | Full build of `main` branch → PROD | `workflow_dispatch` only |
+| `manual-selective-deploy-to-preprod.yml` | Deploy specific models (by selector/branch) → PREPROD | `workflow_dispatch` only |
 
 > **Manual full-build workflows** are disabled by default. Enable them from the GitHub Actions UI when a full baseline rebuild is needed (e.g. first-ever environment setup, environment reset, major macro refactor). After the run completes, disable again. The resulting manifest is saved to cache so the next automated selective build can do accurate state comparison.
 

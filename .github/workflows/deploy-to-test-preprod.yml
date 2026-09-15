@@ -239,9 +239,9 @@ jobs:
           fi
 
           if [ "${{ steps.manifest_check.outputs.USE_STATE }}" == "true" ]; then
-            echo "SELECTIVE build - state:modified.body state:modified.macros (SQL/macro changes + new models/tests, direct only - no downstream cascade)"
+            echo "SELECTIVE build - state:modified.body state:modified.macros (SQL/macro changes, direct only - no downstream cascade)"
             dbt build \
-              --select "state:modified.body state:modified.macros state:new" \
+              --select "state:modified.body state:modified.macros" \
               --state ../previous-manifest/ \
               --target test --no-fail-fast --profiles-dir . 2>&1 | tee /tmp/selective_build.log
             DBT_EXIT=${PIPESTATUS[0]}
@@ -490,9 +490,9 @@ jobs:
           fi
 
           if [ "${{ steps.manifest_check.outputs.USE_STATE }}" == "true" ]; then
-            echo "SELECTIVE build - state:modified.body state:modified.macros (SQL/macro changes + new models/tests, direct only - no downstream cascade)"
+            echo "SELECTIVE build - state:modified.body state:modified.macros (SQL/macro changes, direct only - no downstream cascade)"
             dbt build \
-              --select "state:modified.body state:modified.macros state:new" \
+              --select "state:modified.body state:modified.macros" \
               --exclude "platinum_ai_mosaic_poc_temp_mosaicicssubgroupdetails platinum_ai_mosaic_poc_temp_mosaicicsworkflowendsteps platinum_ai_mosaic_poc_temp_mosaicicsworkflownextactions platinum_ai_mosaic_poc_temp_mosaicicsworkflowsteps platinum_ai_mosaic_poc_temp_mosaicorganisations platinum_ai_mosaic_poc_temp_mosaicworkers" \
               --exclude "silver_Ezytreev_ordworks,test_name:expression_is_true" \
               --state ../previous-manifest/ \
@@ -638,167 +638,155 @@ jobs:
   promote_tested_commit_to_main:
     name: Promote Tested Commit to Main
     runs-on: ubuntu-latest
-    needs: [deploy_test, deploy_preprod]
+    needs: deploy_preprod
     permissions:
       contents: write
       pull-requests: write
 
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
         with:
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Promote tested commit to main
+      - name: Promote exact tested source commit and open PR
         env:
           GH_TOKEN: ${{ github.token }}
-          COMMIT_SHA: ${{ needs.deploy_preprod.outputs.deploy_sha }}
-          ORIGINAL_PR_TITLE: ${{ needs.deploy_preprod.outputs.pr_title }}
-          EVENT_NAME: ${{ github.event_name }}
+          ORIGINAL_PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
           set -euo pipefail
-
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-
-          git fetch origin main test
-
-          # Confirm the SHA exists before doing anything.
-          git cat-file -e "$COMMIT_SHA^{commit}"
-          echo "SHA validated: $COMMIT_SHA exists."
-
-          SHORT_SHA="${COMMIT_SHA:0:7}"
-
-          # -----------------------------------------------------------------------
-          # workflow_dispatch: open a direct test -> main PR.
-          # This brings ALL accumulated changes from test into main at once,
-          # covering any PRs that were merged into test but not yet promoted.
-          # Uses a Conventional Commits-compliant title so lint passes.
-          # -----------------------------------------------------------------------
-          if [ "$EVENT_NAME" == "workflow_dispatch" ]; then
-            echo "Manual dispatch - opening test -> main PR to promote all accumulated changes."
-
-            if git diff --quiet origin/main...origin/test; then
-              echo "Nothing to promote - test is already in main. Skipping PR."
-              exit 0
-            fi
-
-            cat > body.md <<EOF
-          ## 🚀 Promotion: test → main (manual dispatch)
-
-          All pipeline stages passed. This PR promotes **all changes** currently in \`test\`
-          that have not yet been merged into \`main\`.
-
-          | Stage | Status |
-          |-------|--------|
-          | ✅ Build (compile + governance) | Passed |
-          | ✅ Deploy TEST | Passed |
-          | ✅ Deploy PREPROD (approved) | Passed |
-
-          - **Triggered by:** manual workflow_dispatch
-          - **Workflow:** \`${GITHUB_WORKFLOW}\`
-          - **Run:** \`${GITHUB_RUN_ID}\`
-
-          > _Merge this PR to trigger the PROD deploy workflow._
-          EOF
-
-            gh pr create \
-              --base main \
-              --head test \
-              --title "chore: promote test to main (manual dispatch)" \
-              --body-file body.md \
-            || echo "PR may already exist; continuing."
-
-            exit 0
-          fi
-
-          # -----------------------------------------------------------------------
-          # pull_request event: cherry-pick the exact tested commit.
-          # Each merged PR gets its own isolated promote-SHA branch and PR to main.
+          TEST_MERGE_SHA="$GITHUB_SHA"
+          TEST_SHORT_SHA="${TEST_MERGE_SHA:0:7}"
+          echo "---------------------------------------------------"
+          echo "PROMOTION"
+          echo "---------------------------------------------------"
+          echo "TEST merge commit : $TEST_MERGE_SHA"
+          # -------------------------------------------------
+          # Fetch the branches required for the promotion comparison.
+          # -------------------------------------------------
+          git fetch --prune origin main test
+          git cat-file -e "${TEST_MERGE_SHA}^{commit}"
+          # -------------------------------------------------
+          # The TEST commit must be a merge commit.
           #
-          # TITLE STRATEGY: reuse the original feature PR title verbatim.
-          # Since that PR passed the Conventional Commits lint check before being
-          # merged into test, the promote PR title is guaranteed to pass too.
-          # This also surfaces the dbt model name (e.g. feat(DHE-2812): permit_details-...)
-          # directly in the PR list, making it easy to trace what was promoted.
-          # -----------------------------------------------------------------------
-          PROMO_BRANCH="promote-${SHORT_SHA}"
-          echo "PR merge - promoting commit $COMMIT_SHA via branch $PROMO_BRANCH"
-
-          # Skip if commit is already in main.
-          if git merge-base --is-ancestor "$COMMIT_SHA" origin/main; then
-            echo "Nothing to promote - commit already in main. Skipping PR."
+          # Parent 1 = TEST immediately before the PR was merged
+          # Parent 2 = exact feature branch HEAD that was merged
+          #
+          # We promote Parent 2, NOT the TEST merge commit.
+          # -------------------------------------------------
+          if ! git rev-parse "${TEST_MERGE_SHA}^2" >/dev/null 2>&1; then
+            echo "::error::Expected $TEST_MERGE_SHA to be a merge commit."
+            echo "::error::Cannot safely determine the exact source commit that was merged into TEST."
+            exit 1
+          fi
+          SOURCE_SHA=$(git rev-parse "${TEST_MERGE_SHA}^2")
+          SOURCE_SHORT_SHA="${SOURCE_SHA:0:7}"
+          SOURCE_BRANCH_SHA="${SOURCE_SHA:0:12}"
+          PROMO_BRANCH="promote-${SOURCE_SHORT_SHA}"
+          echo "Source commit    : $SOURCE_SHA"
+          echo "Promotion branch : $PROMO_BRANCH"
+          echo "Target branch    : main"
+          git cat-file -e "${SOURCE_SHA}^{commit}"
+          # -------------------------------------------------
+          # IMPORTANT:
+          #
+          # Create the promotion branch DIRECTLY from the exact feature
+          # commit that was merged into TEST.
+          #
+          # Do NOT:
+          #   - cherry-pick the TEST merge commit
+          #   - checkout the current feature branch
+          #   - take the latest feature branch HEAD
+          #
+          # This pins promotion to exactly what went through TEST.
+          # -------------------------------------------------
+          git checkout -B "$PROMO_BRANCH" "$SOURCE_SHA"
+          echo
+          echo "Promotion branch created at:"
+          git log -1 --oneline
+          # -------------------------------------------------
+          # Check whether there is anything from this source commit that
+          # still needs to be promoted to main.
+          # -------------------------------------------------
+          if git diff --quiet origin/main...HEAD; then
+            echo "Nothing to promote."
+            echo "The tested source changes are already represented in main."
             exit 0
           fi
-
-          # Create promotion branch from main.
-          git checkout -B "$PROMO_BRANCH" origin/main
-
-          CHERRY_PICK_OK=true
-
-          # Handle merge commits (cherry-pick -m 1) vs normal commits.
-          if git rev-parse "${COMMIT_SHA}^2" >/dev/null 2>&1; then
-            echo "Merge commit detected; cherry-picking with -m 1"
-            if ! git cherry-pick -m 1 "$COMMIT_SHA"; then
-              CHERRY_PICK_OK=false
+          echo
+          echo "Files that will appear in the PR against main:"
+          echo "-------------------------------------------------"
+          git diff --name-status origin/main...HEAD
+          echo "-------------------------------------------------"
+          # -------------------------------------------------
+          # Push promotion branch safely.
+          #
+          # If this workflow is re-run and the branch already exists,
+          # ensure it still points to the exact same tested SHA.
+          # -------------------------------------------------
+          REMOTE_SHA=$(git ls-remote \
+            --heads origin "$PROMO_BRANCH" \
+            | awk '{print $1}')
+          if [[ -n "$REMOTE_SHA" ]]; then
+            echo "Promotion branch already exists remotely."
+            echo "Remote SHA : $REMOTE_SHA"
+            echo "Source SHA : $SOURCE_SHA"
+            if [[ "$REMOTE_SHA" != "$SOURCE_SHA" ]]; then
+              echo "::error::Promotion branch $PROMO_BRANCH already exists but points to a different commit."
+              echo "::error::Refusing to overwrite an existing promotion branch."
+              exit 1
             fi
+            echo "Remote promotion branch already points to the correct tested commit."
           else
-            echo "Normal commit; cherry-picking without -m"
-            if ! git cherry-pick "$COMMIT_SHA"; then
-              CHERRY_PICK_OK=false
-            fi
+            echo "Pushing promotion branch..."
+            git push -u origin "$PROMO_BRANCH"
           fi
-
-          # Skip if cherry-pick produced no diff (already in main).
-          if [[ "$CHERRY_PICK_OK" == "true" ]] && git diff --quiet origin/main...HEAD; then
-            echo "Nothing to promote; already in main or empty cherry-pick."
-            exit 0
-          fi
-
-          echo "Pushing branch..."
-          git push -u origin "$PROMO_BRANCH" --force-with-lease
-
-          # Use the original feature PR title as the promote PR title.
-          # Falls back to a conventional-commits-safe default if empty.
-          # Append [promote] so the PR is clearly identifiable as a promotion PR
-          # in the PR list while still passing the Conventional Commits lint check.
-          BASE_TITLE="${ORIGINAL_PR_TITLE:-chore: promote ${SHORT_SHA} to main}"
+          # -------------------------------------------------
+          # Build PR description.
+          # -------------------------------------------------
+          BASE_TITLE="${ORIGINAL_PR_TITLE:-Promote tested ${SOURCE_SHORT_SHA} to main}"
           PROMOTE_TITLE="${BASE_TITLE} [promote]"
-
           cat > body.md <<EOF
-          ## 🚀 Ready to merge to PROD - all gates passed ✅
+          Promotion PR for **\`${PROMOTE_TITLE}\`**.
 
-          This PR promotes the changes from **\`${PROMOTE_TITLE}\`** through to \`main\`
-          after successfully passing all pipeline stages.
+          All pipeline stages passed. Merging this PR will trigger the PROD deploy workflow.
 
-          | Stage | Status |
+          | Stage | Result |
           |-------|--------|
-          | ✅ Build (compile + governance) | Passed |
-          | ✅ Deploy TEST | Passed |
-          | ✅ Deploy PREPROD (approved) | Passed |
+          | Build (compile + governance) | Passed |
+          | Deploy TEST | Passed |
+          | Deploy PREPROD | Passed (approved) |
 
-          **Pinned commit SHA:** \`${COMMIT_SHA}\`
-          **Short SHA:** \`${SHORT_SHA}\`
+          **Pinned commit SHA:** \`${SOURCE_SHA}\`
+          **Short SHA:** \`${SOURCE_SHORT_SHA}\`
           **Workflow:** \`${GITHUB_WORKFLOW}\`
           **Run:** [${GITHUB_RUN_ID}](https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})
           **Promotion branch:** \`${PROMO_BRANCH}\`
 
-          > Merge this PR to trigger the PROD deploy workflow.
+          The promotion branch is pinned to the exact source commit that was merged into test.
+          Any commits pushed to the original feature branch after that merge are not included here.
           EOF
-
-          if [[ "$CHERRY_PICK_OK" == "false" ]]; then
-            cat >> body.md <<EOF
-
-          ⚠️ **Cherry-pick conflict detected**
-          This PR was created to allow manual conflict resolution before merging to main.
-          EOF
-          fi
-
-          echo "Creating PR $PROMO_BRANCH -> main with title: $PROMOTE_TITLE"
-          gh pr create \
+          # -------------------------------------------------
+          # Do not create duplicate promotion PRs.
+          # -------------------------------------------------
+          echo
+          echo "Checking for an existing promotion PR..."
+          EXISTING_PR=$(gh pr list \
             --base main \
             --head "$PROMO_BRANCH" \
-            --title "$PROMOTE_TITLE" \
-            --body-file body.md \
-          || echo "PR may already exist; continuing."
+            --state open \
+            --json number \
+            --jq '.[0].number // empty')
+
+          if [[ -n "$EXISTING_PR" ]]; then
+            echo "Promotion PR #${EXISTING_PR} already exists."
+          else
+            echo "Creating PR from $PROMO_BRANCH -> main..."
+            gh pr create \
+              --base main \
+              --head "$PROMO_BRANCH" \
+              --title "$PROMOTE_TITLE" \
+              --body-file body.md
+          fi

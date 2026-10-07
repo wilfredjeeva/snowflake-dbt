@@ -471,7 +471,24 @@ jobs:
             echo "Manifest found (from previous PREPROD run) - selective build with state comparison"
             echo "USE_STATE=true" >> $GITHUB_OUTPUT
           else
-            echo "No PREPROD manifest in cache - will use git-diff selector to stay selective"
+            echo "No PREPROD manifest in cache - generating baseline manifest from the pre-change commit"
+            PR_BASE="${{ github.event.pull_request.base.sha }}"
+            BASE_REF="${PR_BASE:-HEAD~1}"
+            if git rev-parse --verify "$BASE_REF^{commit}" >/dev/null 2>&1 \
+               && git worktree add /tmp/base-src "$BASE_REF" >/dev/null 2>&1; then
+              cp datahub_refinery/profiles.yml /tmp/base-src/datahub_refinery/profiles.yml
+              if (cd /tmp/base-src/datahub_refinery \
+                    && dbt deps --target preprod \
+                    && dbt parse --target preprod --profiles-dir .) \
+                 && [ -f /tmp/base-src/datahub_refinery/target/manifest.json ]; then
+                mkdir -p previous-manifest
+                cp /tmp/base-src/datahub_refinery/target/manifest.json previous-manifest/manifest.json
+                echo "Baseline manifest generated from $BASE_REF - selective build with state comparison"
+                echo "USE_STATE=true" >> $GITHUB_OUTPUT
+                exit 0
+              fi
+            fi
+            echo "Could not generate baseline manifest - will use git-diff selector"
             echo "USE_STATE=false" >> $GITHUB_OUTPUT
           fi
 
@@ -536,8 +553,18 @@ jobs:
               --target preprod --no-fail-fast --profiles-dir .
           fi
 
-      - name: Generate dbt test HTML report
+      # Ensure target/manifest.json exists even if the build step found nothing to run,
+      # so the manifest cache is always seeded for the next PREPROD run.
+      - name: Ensure manifest exists
         if: always()
+        working-directory: datahub_refinery
+        run: |
+          if [ ! -f target/manifest.json ]; then
+            dbt parse --target preprod --profiles-dir . || true
+          fi
+
+      - name: Generate dbt test HTML report
+        if: always() && hashFiles('datahub_refinery/target/run_results.json') != ''
         run: python scripts/dbt_report.py
 
       - name: Upload dbt test report
@@ -684,7 +711,7 @@ jobs:
           SOURCE_SHA=$(git rev-parse "${TEST_MERGE_SHA}^2")
           SOURCE_SHORT_SHA="${SOURCE_SHA:0:7}"
           SOURCE_BRANCH_SHA="${SOURCE_SHA:0:12}"
-          PROMO_BRANCH="promote-${SOURCE_SHORT_SHA}"
+          PROMO_BRANCH="promote-${SOURCE_BRANCH_SHA}"
           echo "Source commit    : $SOURCE_SHA"
           echo "Promotion branch : $PROMO_BRANCH"
           echo "Target branch    : main"
@@ -692,29 +719,34 @@ jobs:
           # -------------------------------------------------
           # IMPORTANT:
           #
-          # Create the promotion branch DIRECTLY from the exact feature
-          # commit that was merged into TEST.
+          # Create the promotion branch from origin/main and apply ONLY
+          # the changes this PR introduced into TEST, i.e. the diff of
+          # the TEST merge commit against its first parent
+          # (TEST^1 -> TEST). Cherry-picking the merge commit with
+          # "-m 1" does exactly that.
           #
-          # Do NOT:
-          #   - cherry-pick the TEST merge commit
-          #   - checkout the current feature branch
-          #   - take the latest feature branch HEAD
-          #
-          # This pins promotion to exactly what went through TEST.
+          # Do NOT branch from the feature branch HEAD: if that branch
+          # contains earlier work (e.g. a previous PR that reached TEST
+          # but failed PREPROD and was never promoted), the promote PR
+          # would include those unrelated files too.
           # -------------------------------------------------
-          git checkout -B "$PROMO_BRANCH" "$SOURCE_SHA"
-          echo
-          echo "Promotion branch created at:"
-          git log -1 --oneline
-          # -------------------------------------------------
-          # Check whether there is anything from this source commit that
-          # still needs to be promoted to main.
-          # -------------------------------------------------
-          if git diff --quiet origin/main...HEAD; then
+          git checkout -B "$PROMO_BRANCH" origin/main
+          if ! git cherry-pick -m 1 --no-commit "$TEST_MERGE_SHA"; then
+            echo "::error::Could not apply the changes of $TEST_MERGE_SHA onto main cleanly."
+            echo "::error::Likely conflicts with an earlier un-promoted change; resolve manually."
+            git cherry-pick --abort || git reset --hard origin/main
+            exit 1
+          fi
+          if git diff --cached --quiet; then
             echo "Nothing to promote."
             echo "The tested source changes are already represented in main."
             exit 0
           fi
+          git commit -m "${ORIGINAL_PR_TITLE:-chore: promote tested ${SOURCE_SHORT_SHA} to main}" \
+            -m "Promotes only the changes of the PR merged into test as ${TEST_MERGE_SHA} (source ${SOURCE_SHA})."
+          echo
+          echo "Promotion branch created at:"
+          git log -1 --oneline
           echo
           echo "Files that will appear in the PR against main:"
           echo "-------------------------------------------------"
@@ -730,15 +762,8 @@ jobs:
             --heads origin "$PROMO_BRANCH" \
             | awk '{print $1}')
           if [[ -n "$REMOTE_SHA" ]]; then
-            echo "Promotion branch already exists remotely."
-            echo "Remote SHA : $REMOTE_SHA"
-            echo "Source SHA : $SOURCE_SHA"
-            if [[ "$REMOTE_SHA" != "$SOURCE_SHA" ]]; then
-              echo "::error::Promotion branch $PROMO_BRANCH already exists but points to a different commit."
-              echo "::error::Refusing to overwrite an existing promotion branch."
-              exit 1
-            fi
-            echo "Remote promotion branch already points to the correct tested commit."
+            echo "Promotion branch already exists remotely at $REMOTE_SHA."
+            echo "Not overwriting it (re-run); reusing it for the PR."
           else
             echo "Pushing promotion branch..."
             git push -u origin "$PROMO_BRANCH"
@@ -746,7 +771,7 @@ jobs:
           # -------------------------------------------------
           # Build PR description.
           # -------------------------------------------------
-          BASE_TITLE="${ORIGINAL_PR_TITLE:-Promote tested ${SOURCE_SHORT_SHA} to main}"
+          BASE_TITLE="${ORIGINAL_PR_TITLE:-chore: promote tested ${SOURCE_SHORT_SHA} to main}"
           PROMOTE_TITLE="${BASE_TITLE} [promote]"
           cat > body.md <<EOF
           Promotion PR for **\`${PROMOTE_TITLE}\`**.

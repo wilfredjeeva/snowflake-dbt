@@ -1,9 +1,12 @@
 name: dandi-datahub-dbt-to-prod
+run-name: ${{ github.event.pull_request.title || 'Manual run (workflow_dispatch)' }}
 
 on:
-  push:
+  pull_request:
     branches:
       - "main"
+    types:
+      - closed
   workflow_dispatch:
 
 permissions:
@@ -16,16 +19,18 @@ jobs:
     environment: prod
     timeout-minutes: 360
 
-    # Runs automatically on push to main (i.e. after a test-main PR is reviewed, approved, and merged).
+    # Runs automatically when a promote PR is merged into main (reviewed and approved).
     # The prod environment gate pauses the job until an approver confirms in GitHub Actions UI.
     # Also supports manual runs via workflow_dispatch.
     if: |
-      github.event_name == 'push' ||
+      github.event.pull_request.merged == true ||
       github.event_name == 'workflow_dispatch'
 
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          # Merged PR: check out the exact merge commit on main (same as the old push trigger).
+          ref: ${{ github.event.pull_request.merge_commit_sha || github.sha }}
           fetch-depth: 0
 
       - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0

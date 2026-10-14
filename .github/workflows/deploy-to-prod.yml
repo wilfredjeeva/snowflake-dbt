@@ -1,12 +1,10 @@
 name: dandi-datahub-dbt-to-prod
-run-name: ${{ github.event.pull_request.title || 'Manual run (workflow_dispatch)' }}
+run-name: ${{ github.event.head_commit.message || 'Manual run (workflow_dispatch)' }}
 
 on:
-  pull_request:
+  push:
     branches:
-      - "main"
-    types:
-      - closed
+      - main
   workflow_dispatch:
 
 permissions:
@@ -19,18 +17,17 @@ jobs:
     environment: prod
     timeout-minutes: 360
 
-    # Runs automatically when a promote PR is merged into main (reviewed and approved).
-    # The prod environment gate pauses the job until an approver confirms in GitHub Actions UI.
-    # Also supports manual runs via workflow_dispatch.
-    if: |
-      github.event.pull_request.merged == true ||
-      github.event_name == 'workflow_dispatch'
+    # PROD deploys only from main: after a promote PR is merged, or a manual
+    # dispatch that selected main. Promote / feature branches are skipped.
+    # The prod environment gate still pauses until an approver confirms.
+    if: github.ref == 'refs/heads/main'
 
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          # Merged PR: check out the exact merge commit on main (same as the old push trigger).
-          ref: ${{ github.event.pull_request.merge_commit_sha || github.sha }}
+          # Always the commit on main that triggered this run (push SHA, or
+          # main HEAD at dispatch time). Never a promote-branch ref.
+          ref: ${{ github.sha }}
           fetch-depth: 0
 
       - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
@@ -187,54 +184,34 @@ jobs:
               --full-refresh \
               --profiles-dir .
 
-          elif [ "$USE_STATE" == "true" ]; then
-            echo "SELECTIVE build - state:modified.body state:modified.macros (direct changes only - no downstream cascade)"
-            dbt build \
-              --select "state:modified.body state:modified.macros" \
-              --exclude "platinum_ai_mosaic_poc_temp_mosaicicssubgroupdetails platinum_ai_mosaic_poc_temp_mosaicicsworkflowendsteps platinum_ai_mosaic_poc_temp_mosaicicsworkflownextactions platinum_ai_mosaic_poc_temp_mosaicicsworkflowsteps platinum_ai_mosaic_poc_temp_mosaicorganisations platinum_ai_mosaic_poc_temp_mosaicworkers" \
-              --exclude "silver_Ezytreev_ordworks,test_name:expression_is_true" \
-              --state ../previous-manifest/ \
-              --target prod \
-              --no-fail-fast \
-              --profiles-dir . 2>&1 | tee /tmp/selective_build.log
-            DBT_EXIT=${PIPESTATUS[0]}
-            if [ $DBT_EXIT -ne 0 ]; then
-              exit $DBT_EXIT
-            elif grep -q "Nothing to do" /tmp/selective_build.log; then
-              echo "Selective build found nothing to run (re-run or YAML-only change scenario)"
-              echo "Falling back to git-diff model selector to stay selective"
-              MODEL_SELECTORS=$(git diff --name-only HEAD~1 HEAD 2>/dev/null \
-                | grep -E '^datahub_refinery/models/.*\.sql$' \
-                | sed 's|.*/||;s|\.sql$||;s|$|+|' \
-                | tr '\n' ' ' | xargs)
-              if [ -z "$MODEL_SELECTORS" ]; then
-                echo "No model SQL changes found - nothing to build (macro impact handled by state:modified.macros+)"
-                exit 0
-              fi
-              echo "Git-derived model selector: $MODEL_SELECTORS"
-              dbt build --select $MODEL_SELECTORS \
-                --exclude "platinum_ai_mosaic_poc_temp_mosaicicssubgroupdetails platinum_ai_mosaic_poc_temp_mosaicicsworkflowendsteps platinum_ai_mosaic_poc_temp_mosaicicsworkflownextactions platinum_ai_mosaic_poc_temp_mosaicicsworkflowsteps platinum_ai_mosaic_poc_temp_mosaicorganisations platinum_ai_mosaic_poc_temp_mosaicworkers" \
-                --exclude "silver_Ezytreev_ordworks,test_name:expression_is_true" \
-                --target prod --no-fail-fast --profiles-dir .
-            fi
-
           else
-            echo "No manifest available - using git-diff model selector (no full build)"
-            # Note: macro:name+ is not a valid dbt selector. Macro impact is handled by
-            # state:modified.macros+ in the primary path once a manifest is available.
-            MODEL_SELECTORS=$(git diff --name-only HEAD~1 HEAD 2>/dev/null \
-              | grep -E '^datahub_refinery/models/.*\.sql$' \
-              | sed 's|.*/||;s|\.sql$||;s|$|+|' \
-              | tr '\n' ' ' | xargs)
-            if [ -z "$MODEL_SELECTORS" ]; then
-              echo "No model SQL changes found via git diff - nothing to build"
+            # SELECTIVE: build exactly what the merged promote PR changed.
+            # After a promote PR merge, HEAD is the merge commit and HEAD~1 is main
+            # before the merge, so this diff is the promote PR's own file list.
+            # Direct changes only (no "+" downstream cascade), mirroring TEST/PREPROD.
+            # Deleted files are ignored.
+            echo "SELECTIVE build - models/snapshots changed in merge commit $(git rev-parse --short HEAD) (direct changes only)"
+            git diff --name-status --diff-filter=d HEAD~1 HEAD || true
+            mapfile -t SELS < <(git diff --name-only --diff-filter=d HEAD~1 HEAD \
+              | sed 's/\r$//' \
+              | grep -E '^datahub_refinery/(models|snapshots)/.*\.sql$' \
+              | sed 's|^datahub_refinery/||;s|^|path:|' || true)
+            if [ ${#SELS[@]} -eq 0 ]; then
+              echo "No model/snapshot SQL changes in this merge - nothing to build"
               exit 0
             fi
-            echo "Git-derived model selector: $MODEL_SELECTORS"
-            dbt build --select $MODEL_SELECTORS \
+            echo "Git-derived path selectors (${#SELS[@]}):"
+            printf '  %s\n' "${SELS[@]}"
+            dbt build --select "${SELS[@]}" \
               --exclude "platinum_ai_mosaic_poc_temp_mosaicicssubgroupdetails platinum_ai_mosaic_poc_temp_mosaicicsworkflowendsteps platinum_ai_mosaic_poc_temp_mosaicicsworkflownextactions platinum_ai_mosaic_poc_temp_mosaicicsworkflowsteps platinum_ai_mosaic_poc_temp_mosaicorganisations platinum_ai_mosaic_poc_temp_mosaicworkers" \
               --exclude "silver_Ezytreev_ordworks,test_name:expression_is_true" \
-              --target prod --no-fail-fast --profiles-dir .
+              --target prod --no-fail-fast --profiles-dir . 2>&1 | tee /tmp/dbt_build.log
+            DBT_EXIT=${PIPESTATUS[0]}
+            if grep -q "Nothing to do" /tmp/dbt_build.log; then
+              echo "::error::dbt matched no nodes for this merge. Refusing empty build."
+              exit 1
+            fi
+            exit "$DBT_EXIT"
           fi
 
       - name: Generate dbt test HTML report

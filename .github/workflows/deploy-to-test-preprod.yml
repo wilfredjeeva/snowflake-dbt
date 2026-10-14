@@ -2,7 +2,7 @@
 # Triggered when a PR is merged into test, or manually via workflow_dispatch.
 
 name: dandi-datahub-dbt-to-test-preprod
-run-name: ${{ github.event.pull_request.title || 'Manual run (workflow_dispatch)' }}
+run-name: ${{ github.event.pull_request.title || github.event.inputs.pr_title || 'Manual run (workflow_dispatch)' }}
 
 on:
   pull_request:
@@ -11,6 +11,15 @@ on:
     types:
       - closed
   workflow_dispatch:
+    inputs:
+      merge_sha:
+        description: "TEST merge commit SHA to replay (from the merged PR). Leave empty to use current test HEAD."
+        required: false
+        type: string
+      pr_title:
+        description: "Original PR title (used for the promote PR). Leave empty for a generic title."
+        required: false
+        type: string
 
 permissions:
   id-token: write
@@ -33,12 +42,25 @@ jobs:
       deploy_sha: ${{ steps.capture_meta.outputs.sha }}
       build_type: ${{ steps.build_scope.outputs.BUILD_TYPE }}
       dbt_selector: ${{ steps.build_scope.outputs.DBT_SELECTOR }}
+      model_selectors: ${{ steps.build_scope.outputs.MODEL_SELECTORS }}
       pr_title: ${{ steps.capture_meta.outputs.pr_title }}
 
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          # Fetch the branch that contains this workflow (test). Do not pass
+          # merge_sha as `ref`: GitHub cannot fetch abbreviated SHAs.
           fetch-depth: 0
+
+      - name: Checkout merge commit to replay
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.merge_sha != ''
+        run: |
+          set -euo pipefail
+          MERGE_SHA="${{ github.event.inputs.merge_sha }}"
+          echo "Resolving merge SHA: $MERGE_SHA"
+          git checkout --detach "$MERGE_SHA"
+          echo "Checked out $(git rev-parse HEAD)"
+          git log -1 --oneline
 
       - name: Capture commit SHA and PR title
         id: capture_meta
@@ -51,6 +73,9 @@ jobs:
           # This guarantees the promote PR title matches Conventional Commits lint rules
           # (the feature PR already passed lint before being merged into test).
           RAW_TITLE="${{ github.event.pull_request.title }}"
+          if [ -z "$RAW_TITLE" ]; then
+            RAW_TITLE="${{ github.event.inputs.pr_title }}"
+          fi
           if [ -z "$RAW_TITLE" ]; then
             RAW_TITLE="chore: promote test to main (manual dispatch)"
           fi
@@ -68,33 +93,50 @@ jobs:
           python -m pip install --upgrade pip
           pip install dbt-core==1.9.4 dbt-snowflake==1.9.2 pyyaml
 
-      # Always selective - state:modified+ handles macro/config changes via SQL hash comparison.
+      # Always selective: the model list is the SQL files this PR changed.
+      # TEST, PREPROD, and PROD all reuse this list so they run the same objects.
+      # Do not use state:modified — a stale env manifest would also rebuild
+      # models from earlier PRs that never succeeded in that environment.
       - name: Detect build scope (always selective)
         id: build_scope
         run: |
-          # Use PR base/head SHAs for accurate diff when triggered by pull_request.
-          # Falls back to HEAD~1 for workflow_dispatch.
+          # GitHub's PR "Files changed" tab is a three-dot diff (merge-base...head).
+          # Two-dot `git diff base head` compares full trees, so if the feature
+          # branch is behind test it lists hundreds of unrelated files.
+          # After a merge, HEAD is the merge commit: HEAD^1...HEAD is exactly
+          # the files this PR brought into test (same as the GitHub UI).
           PR_BASE="${{ github.event.pull_request.base.sha }}"
           PR_HEAD="${{ github.event.pull_request.head.sha }}"
-          if [ -n "$PR_BASE" ] && [ -n "$PR_HEAD" ]; then
-            CHANGED=$(git diff --name-only "$PR_BASE" "$PR_HEAD" 2>/dev/null || true)
+          if git rev-parse -q --verify HEAD^2 >/dev/null; then
+            echo "Using merge-commit diff: HEAD^1...HEAD"
+            CHANGED=$(git diff --name-only --diff-filter=d HEAD^1 HEAD)
+          elif [ -n "$PR_BASE" ] && [ -n "$PR_HEAD" ]; then
+            echo "Using three-dot PR diff: $PR_BASE...$PR_HEAD"
+            CHANGED=$(git diff --name-only --diff-filter=d "$PR_BASE"..."$PR_HEAD" 2>/dev/null || true)
           else
-            CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || git diff --name-only HEAD)
+            echo "Using HEAD~1...HEAD (workflow_dispatch fallback)"
+            CHANGED=$(git diff --name-only --diff-filter=d HEAD~1 HEAD 2>/dev/null || git diff --name-only --diff-filter=d HEAD)
           fi
-          echo "Changed files:"
+          echo "Changed files in this PR ($(echo "$CHANGED" | sed '/^$/d' | wc -l)):"
           echo "$CHANGED"
 
-          if echo "$CHANGED" | grep -qE \
-            '(dbt_project\.yml|profiles\.yml|packages\.yml|datahub_refinery/macros/|\.github/workflows/)'; then
-            echo ">>> Config/macro/workflow change detected."
-            echo ">>> state:modified+ detects affected models automatically via SQL hash comparison."
-          else
-            echo ">>> Model/YAML change only."
-          fi
+          MODEL_SELECTORS=$(echo "$CHANGED" \
+            | grep -E '^datahub_refinery/(models|snapshots)/.*\.sql$' || true \
+            | sed 's|.*/||;s|\.sql$||' \
+            | tr '\n' ' ' | sed 's/[[:space:]]*$//')
+          echo ">>> Models/snapshots to build: ${MODEL_SELECTORS:-<none>}"
 
-          echo "BUILD_TYPE=selective"         >> $GITHUB_OUTPUT
-          echo "DBT_SELECTOR=state:modified+" >> $GITHUB_OUTPUT
-          echo ">>> SELECTIVE build scheduled"
+          # Heredoc so spaces in the selector cannot break GITHUB_OUTPUT parsing.
+          {
+            echo "MODEL_SELECTORS<<EOF"
+            echo "$MODEL_SELECTORS"
+            echo "EOF"
+            echo "BUILD_TYPE=selective"
+            echo "DBT_SELECTOR<<EOF"
+            echo "$MODEL_SELECTORS"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo ">>> SELECTIVE build scheduled (this PR's files only)"
 
       - name: Validate governance metadata (tags, owner, classification)
         run: |
@@ -124,6 +166,7 @@ jobs:
       deploy_sha: ${{ needs.build.outputs.deploy_sha }}
       build_type: ${{ needs.build.outputs.build_type }}
       dbt_selector: ${{ needs.build.outputs.dbt_selector }}
+      model_selectors: ${{ needs.build.outputs.model_selectors }}
       pr_title: ${{ needs.build.outputs.pr_title }}
 
     steps:
@@ -220,62 +263,44 @@ jobs:
           print("CI profiles.yml written for test.")
           PYEOF
 
-      # dbt build runs models AND tests together.
-      # Primary path  : state:modified.body   → only models where SQL body changed (no downstream cascade)
-      #                 state:modified.macros+ → only models that depend on a changed macro + downstream
-      # This prevents full builds: macro changes only rebuild affected models, not all 2800 objects.
-      # Fallback path  : git-diff derived model selectors only (macro impact handled by primary path).
+      # Compute selectors HERE from the checked-out merge commit.
+      # Do not use job outputs: multiline GITHUB_OUTPUT was passing repo
+      # file paths into --select, so dbt matched 0 nodes and built nothing.
       - name: Build changed dbt models (selective - direct changes only)
         timeout-minutes: 340
         working-directory: datahub_refinery
         run: |
-          # Compute accurate git diff once (PR base→head for PR events, HEAD~1 for dispatch)
-          PR_BASE="${{ github.event.pull_request.base.sha }}"
-          PR_HEAD="${{ github.event.pull_request.head.sha }}"
-          if [ -n "$PR_BASE" ] && [ -n "$PR_HEAD" ]; then
-            GIT_CHANGED=$(git diff --name-only "$PR_BASE" "$PR_HEAD" 2>/dev/null || true)
+          set -euo pipefail
+          if git rev-parse -q --verify HEAD^2 >/dev/null; then
+            echo "Selector source: merge-commit diff HEAD^1...HEAD"
+            CHANGED=$(git -C "$GITHUB_WORKSPACE" diff --name-only --diff-filter=d HEAD^1 HEAD)
           else
-            GIT_CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || true)
+            echo "Selector source: HEAD~1...HEAD"
+            CHANGED=$(git -C "$GITHUB_WORKSPACE" diff --name-only --diff-filter=d HEAD~1 HEAD)
           fi
-
-          if [ "${{ steps.manifest_check.outputs.USE_STATE }}" == "true" ]; then
-            echo "SELECTIVE build - state:modified.body state:modified.macros (SQL/macro changes, direct only - no downstream cascade)"
-            dbt build \
-              --select "state:modified.body state:modified.macros" \
-              --state ../previous-manifest/ \
-              --target test --no-fail-fast --profiles-dir . 2>&1 | tee /tmp/selective_build.log
-            DBT_EXIT=${PIPESTATUS[0]}
-            if [ $DBT_EXIT -ne 0 ]; then
-              exit $DBT_EXIT
-            elif grep -q "Nothing to do" /tmp/selective_build.log; then
-              echo "Selective build found nothing to run (re-run or YAML-only change scenario)"
-              echo "Falling back to git-diff model selector to stay selective"
-              MODEL_SELECTORS=$(echo "$GIT_CHANGED" \
-                | grep -E '^datahub_refinery/models/.*\.sql$' \
-                | sed 's|.*/||;s|\.sql$||;s|$|+|' \
-                | tr '\n' ' ' | xargs)
-              if [ -z "$MODEL_SELECTORS" ]; then
-                echo "No model SQL changes found - nothing to build (macro impact handled by state:modified.macros+)"
-                exit 0
-              fi
-              echo "Git-derived model selector: $MODEL_SELECTORS"
-              dbt build --select $MODEL_SELECTORS --target test --no-fail-fast --profiles-dir .
-            fi
-          else
-            echo "No manifest available - using git-diff model selector (no full build)"
-            # Note: macro:name+ is not a valid dbt selector. Macro impact is handled by
-            # state:modified.macros+ in the primary path once a manifest is available.
-            MODEL_SELECTORS=$(echo "$GIT_CHANGED" \
-              | grep -E '^datahub_refinery/models/.*\.sql$' \
-              | sed 's|.*/||;s|\.sql$||;s|$|+|' \
-              | tr '\n' ' ' | xargs)
-            if [ -z "$MODEL_SELECTORS" ]; then
-              echo "No model SQL changes found via git diff - nothing to build"
-              exit 0
-            fi
-            echo "Git-derived model selector: $MODEL_SELECTORS"
-            dbt build --select $MODEL_SELECTORS --target test --no-fail-fast --profiles-dir .
+          echo "Changed files in this PR:"
+          echo "$CHANGED"
+          # path: is relative to the dbt project (this working-directory).
+          mapfile -t SELS < <(printf '%s\n' "$CHANGED" \
+            | sed 's/\r$//' \
+            | grep -E '^datahub_refinery/(models|snapshots)/.*\.sql$' \
+            | sed 's|^datahub_refinery/||;s|^|path:|' || true)
+          if [ ${#SELS[@]} -eq 0 ]; then
+            echo "No model/snapshot SQL changes in this PR - nothing to build"
+            exit 0
           fi
+          echo "SELECTIVE build - this PR only (${#SELS[@]} SQL files):"
+          printf '  %s\n' "${SELS[@]}"
+          dbt build --select "${SELS[@]}" \
+            --exclude "platinum_ai_mosaic_poc_temp_mosaicicssubgroupdetails platinum_ai_mosaic_poc_temp_mosaicicsworkflowendsteps platinum_ai_mosaic_poc_temp_mosaicicsworkflownextactions platinum_ai_mosaic_poc_temp_mosaicicsworkflowsteps platinum_ai_mosaic_poc_temp_mosaicorganisations platinum_ai_mosaic_poc_temp_mosaicworkers" \
+            --exclude "silver_Ezytreev_ordworks,test_name:expression_is_true" \
+            --target test --no-fail-fast --profiles-dir . 2>&1 | tee /tmp/dbt_build.log
+          DBT_EXIT=${PIPESTATUS[0]}
+          if grep -q "Nothing to do" /tmp/dbt_build.log; then
+            echo "::error::dbt matched no nodes for this PR's SQL files. Refusing empty build."
+            exit 1
+          fi
+          exit "$DBT_EXIT"
 
       - name: Generate dbt test HTML report
         if: always()
@@ -361,6 +386,7 @@ jobs:
       deploy_sha: ${{ needs.deploy_test.outputs.deploy_sha }}
       build_type: ${{ needs.deploy_test.outputs.build_type }}
       dbt_selector: ${{ needs.deploy_test.outputs.dbt_selector }}
+      model_selectors: ${{ needs.deploy_test.outputs.model_selectors }}
       pr_title: ${{ needs.deploy_test.outputs.pr_title }}
 
     steps:
@@ -467,91 +493,50 @@ jobs:
         id: manifest_check
         if: needs.deploy_test.outputs.build_type == 'selective'
         run: |
+          # Manifest cache is retained for diagnostics only. Builds use the
+          # PR file list (same selector as TEST), not state:modified.
           if [ -f "previous-manifest/manifest.json" ]; then
-            echo "Manifest found (from previous PREPROD run) - selective build with state comparison"
-            echo "USE_STATE=true" >> $GITHUB_OUTPUT
+            echo "PREPROD manifest present in cache (not used for model selection)"
           else
-            echo "No PREPROD manifest in cache - generating baseline manifest from the pre-change commit"
-            PR_BASE="${{ github.event.pull_request.base.sha }}"
-            BASE_REF="${PR_BASE:-HEAD~1}"
-            if git rev-parse --verify "$BASE_REF^{commit}" >/dev/null 2>&1 \
-               && git worktree add /tmp/base-src "$BASE_REF" >/dev/null 2>&1; then
-              cp datahub_refinery/profiles.yml /tmp/base-src/datahub_refinery/profiles.yml
-              if (cd /tmp/base-src/datahub_refinery \
-                    && dbt deps --target preprod \
-                    && dbt parse --target preprod --profiles-dir .) \
-                 && [ -f /tmp/base-src/datahub_refinery/target/manifest.json ]; then
-                mkdir -p previous-manifest
-                cp /tmp/base-src/datahub_refinery/target/manifest.json previous-manifest/manifest.json
-                echo "Baseline manifest generated from $BASE_REF - selective build with state comparison"
-                echo "USE_STATE=true" >> $GITHUB_OUTPUT
-                exit 0
-              fi
-            fi
-            echo "Could not generate baseline manifest - will use git-diff selector"
-            echo "USE_STATE=false" >> $GITHUB_OUTPUT
+            echo "No PREPROD manifest in cache"
           fi
+          echo "USE_STATE=false" >> $GITHUB_OUTPUT
 
-      # Always selective - mirrors TEST. state:modified.body state:modified.macros prevents full builds.
+      # Same as TEST: selectors from this merge commit, not job outputs / state:modified.
       - name: Build dbt models (selective - direct changes only)
         timeout-minutes: 340
         working-directory: datahub_refinery
         run: |
-          # Compute accurate git diff once (PR base→head for PR events, HEAD~1 for dispatch)
-          PR_BASE="${{ github.event.pull_request.base.sha }}"
-          PR_HEAD="${{ github.event.pull_request.head.sha }}"
-          if [ -n "$PR_BASE" ] && [ -n "$PR_HEAD" ]; then
-            GIT_CHANGED=$(git diff --name-only "$PR_BASE" "$PR_HEAD" 2>/dev/null || true)
+          set -euo pipefail
+          if git rev-parse -q --verify HEAD^2 >/dev/null; then
+            echo "Selector source: merge-commit diff HEAD^1...HEAD (same as TEST)"
+            CHANGED=$(git -C "$GITHUB_WORKSPACE" diff --name-only --diff-filter=d HEAD^1 HEAD)
           else
-            GIT_CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || true)
+            echo "Selector source: HEAD~1...HEAD"
+            CHANGED=$(git -C "$GITHUB_WORKSPACE" diff --name-only --diff-filter=d HEAD~1 HEAD)
           fi
-
-          if [ "${{ steps.manifest_check.outputs.USE_STATE }}" == "true" ]; then
-            echo "SELECTIVE build - state:modified.body state:modified.macros (SQL/macro changes, direct only - no downstream cascade)"
-            dbt build \
-              --select "state:modified.body state:modified.macros" \
-              --exclude "platinum_ai_mosaic_poc_temp_mosaicicssubgroupdetails platinum_ai_mosaic_poc_temp_mosaicicsworkflowendsteps platinum_ai_mosaic_poc_temp_mosaicicsworkflownextactions platinum_ai_mosaic_poc_temp_mosaicicsworkflowsteps platinum_ai_mosaic_poc_temp_mosaicorganisations platinum_ai_mosaic_poc_temp_mosaicworkers" \
-              --exclude "silver_Ezytreev_ordworks,test_name:expression_is_true" \
-              --state ../previous-manifest/ \
-              --target preprod --no-fail-fast --profiles-dir . 2>&1 | tee /tmp/selective_build.log
-            DBT_EXIT=${PIPESTATUS[0]}
-            if [ $DBT_EXIT -ne 0 ]; then
-              exit $DBT_EXIT
-            elif grep -q "Nothing to do" /tmp/selective_build.log; then
-              echo "Selective build found nothing to run (re-run or YAML-only change scenario)"
-              echo "Falling back to git-diff model selector to stay selective"
-              MODEL_SELECTORS=$(echo "$GIT_CHANGED" \
-                | grep -E '^datahub_refinery/models/.*\.sql$' \
-                | sed 's|.*/||;s|\.sql$||;s|$|+|' \
-                | tr '\n' ' ' | xargs)
-              if [ -z "$MODEL_SELECTORS" ]; then
-                echo "No model SQL changes found - nothing to build (macro impact handled by state:modified.macros+)"
-                exit 0
-              fi
-              echo "Git-derived model selector: $MODEL_SELECTORS"
-              dbt build --select $MODEL_SELECTORS \
-                --exclude "platinum_ai_mosaic_poc_temp_mosaicicssubgroupdetails platinum_ai_mosaic_poc_temp_mosaicicsworkflowendsteps platinum_ai_mosaic_poc_temp_mosaicicsworkflownextactions platinum_ai_mosaic_poc_temp_mosaicicsworkflowsteps platinum_ai_mosaic_poc_temp_mosaicorganisations platinum_ai_mosaic_poc_temp_mosaicworkers" \
-                --exclude "silver_Ezytreev_ordworks,test_name:expression_is_true" \
-                --target preprod --no-fail-fast --profiles-dir .
-            fi
-          else
-            echo "No manifest available - using git-diff model selector (no full build)"
-            # Note: macro:name+ is not a valid dbt selector. Macro impact is handled by
-            # state:modified.macros+ in the primary path once a manifest is available.
-            MODEL_SELECTORS=$(echo "$GIT_CHANGED" \
-              | grep -E '^datahub_refinery/models/.*\.sql$' \
-              | sed 's|.*/||;s|\.sql$||;s|$|+|' \
-              | tr '\n' ' ' | xargs)
-            if [ -z "$MODEL_SELECTORS" ]; then
-              echo "No model SQL changes found via git diff - nothing to build"
-              exit 0
-            fi
-            echo "Git-derived model selector: $MODEL_SELECTORS"
-            dbt build --select $MODEL_SELECTORS \
-              --exclude "platinum_ai_mosaic_poc_temp_mosaicicssubgroupdetails platinum_ai_mosaic_poc_temp_mosaicicsworkflowendsteps platinum_ai_mosaic_poc_temp_mosaicicsworkflownextactions platinum_ai_mosaic_poc_temp_mosaicicsworkflowsteps platinum_ai_mosaic_poc_temp_mosaicorganisations platinum_ai_mosaic_poc_temp_mosaicworkers" \
-              --exclude "silver_Ezytreev_ordworks,test_name:expression_is_true" \
-              --target preprod --no-fail-fast --profiles-dir .
+          echo "Changed files in this PR:"
+          echo "$CHANGED"
+          mapfile -t SELS < <(printf '%s\n' "$CHANGED" \
+            | sed 's/\r$//' \
+            | grep -E '^datahub_refinery/(models|snapshots)/.*\.sql$' \
+            | sed 's|^datahub_refinery/||;s|^|path:|' || true)
+          if [ ${#SELS[@]} -eq 0 ]; then
+            echo "No model/snapshot SQL changes in this PR - nothing to build"
+            exit 0
           fi
+          echo "SELECTIVE build - this PR only (${#SELS[@]} SQL files, same as TEST):"
+          printf '  %s\n' "${SELS[@]}"
+          dbt build --select "${SELS[@]}" \
+            --exclude "platinum_ai_mosaic_poc_temp_mosaicicssubgroupdetails platinum_ai_mosaic_poc_temp_mosaicicsworkflowendsteps platinum_ai_mosaic_poc_temp_mosaicicsworkflownextactions platinum_ai_mosaic_poc_temp_mosaicicsworkflowsteps platinum_ai_mosaic_poc_temp_mosaicorganisations platinum_ai_mosaic_poc_temp_mosaicworkers" \
+            --exclude "silver_Ezytreev_ordworks,test_name:expression_is_true" \
+            --target preprod --no-fail-fast --profiles-dir . 2>&1 | tee /tmp/dbt_build.log
+          DBT_EXIT=${PIPESTATUS[0]}
+          if grep -q "Nothing to do" /tmp/dbt_build.log; then
+            echo "::error::dbt matched no nodes for this PR's SQL files. Refusing empty build."
+            exit 1
+          fi
+          exit "$DBT_EXIT"
 
       # Ensure target/manifest.json exists even if the build step found nothing to run,
       # so the manifest cache is always seeded for the next PREPROD run.
@@ -612,14 +597,16 @@ jobs:
         run: |
           mkdir -p /tmp/build-meta
           echo "${{ needs.deploy_test.outputs.build_type }}" > /tmp/build-meta/build_type.txt
+          echo "${{ needs.deploy_test.outputs.model_selectors }}" > /tmp/build-meta/model_selectors.txt
           echo "Build type saved: ${{ needs.deploy_test.outputs.build_type }}"
+          echo "Model selectors saved: ${{ needs.deploy_test.outputs.model_selectors }}"
 
       - name: Upload build type artifact
         if: always()
         uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
         with:
           name: pipeline-build-meta
-          path: /tmp/build-meta/build_type.txt
+          path: /tmp/build-meta/
           if-no-files-found: warn
           retention-days: 15
 
@@ -673,18 +660,19 @@ jobs:
     steps:
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
         with:
+          ref: ${{ needs.deploy_preprod.outputs.deploy_sha }}
           fetch-depth: 0
 
       - name: Promote exact tested source commit and open PR
         env:
           GH_TOKEN: ${{ github.token }}
-          ORIGINAL_PR_TITLE: ${{ github.event.pull_request.title }}
+          ORIGINAL_PR_TITLE: ${{ needs.deploy_preprod.outputs.pr_title }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          TEST_MERGE_SHA="$GITHUB_SHA"
+          TEST_MERGE_SHA="${{ needs.deploy_preprod.outputs.deploy_sha }}"
           TEST_SHORT_SHA="${TEST_MERGE_SHA:0:7}"
           echo "---------------------------------------------------"
           echo "PROMOTION"
@@ -717,25 +705,42 @@ jobs:
           echo "Target branch    : main"
           git cat-file -e "${SOURCE_SHA}^{commit}"
           # -------------------------------------------------
-          # IMPORTANT:
+          # Promote ONLY this PR's files onto origin/main (never the
+          # whole of test). Same as parliament: files already on main
+          # drop out, so the promote PR is the same size or smaller.
           #
-          # Create the promotion branch from origin/main and apply ONLY
-          # the changes this PR introduced into TEST, i.e. the diff of
-          # the TEST merge commit against its first parent
-          # (TEST^1 -> TEST). Cherry-picking the merge commit with
-          # "-m 1" does exactly that.
-          #
-          # Do NOT branch from the feature branch HEAD: if that branch
-          # contains earlier work (e.g. a previous PR that reached TEST
-          # but failed PREPROD and was never promoted), the promote PR
-          # would include those unrelated files too.
+          # 1) Cherry-pick -m 1 when it applies cleanly (exact PR patch).
+          # 2) If a shared yml/delete conflicts, keep going: take the
+          #    TEST merge version of *unmerged* paths only. Other PRs'
+          #    SQL models are not added. TEST/PREPROD/PROD still build
+          #    only this PR's SQL.
           # -------------------------------------------------
           git checkout -B "$PROMO_BRANCH" origin/main
-          if ! git cherry-pick -m 1 --no-commit "$TEST_MERGE_SHA"; then
-            echo "::error::Could not apply the changes of $TEST_MERGE_SHA onto main cleanly."
-            echo "::error::Likely conflicts with an earlier un-promoted change; resolve manually."
-            git cherry-pick --abort || git reset --hard origin/main
-            exit 1
+          echo "Files this PR introduced into TEST:"
+          git diff --name-status "${TEST_MERGE_SHA}^1" "$TEST_MERGE_SHA"
+          if git cherry-pick -m 1 --no-commit "$TEST_MERGE_SHA"; then
+            echo "Cherry-pick applied cleanly (this PR's patch only)."
+          else
+            echo "Cherry-pick hit conflicts. Resolving with TEST versions of unmerged paths only."
+            while IFS= read -r path; do
+              [ -z "$path" ] && continue
+              echo "  TEST version: $path"
+              if git cat-file -e "${TEST_MERGE_SHA}:${path}" 2>/dev/null; then
+                git checkout "$TEST_MERGE_SHA" -- "$path"
+                git add -- "$path"
+              else
+                git rm -f --ignore-unmatch -- "$path" || true
+              fi
+            done < <(git diff --name-only --diff-filter=U ; git ls-files -u | awk '{print $4}' | sort -u)
+            rm -f .git/CHERRY_PICK_HEAD .git/SEQUENCER_HEAD 2>/dev/null || true
+            if ! git diff --name-only --diff-filter=U | grep -q .; then
+              echo "All conflicts resolved."
+            else
+              echo "::error::Unmerged paths remain after taking TEST versions:"
+              git diff --name-only --diff-filter=U
+              git cherry-pick --abort || git reset --hard origin/main
+              exit 1
+            fi
           fi
           if git diff --cached --quiet; then
             echo "Nothing to promote."
@@ -797,21 +802,46 @@ jobs:
           # Do not create duplicate promotion PRs.
           # -------------------------------------------------
           echo
+          COMPARE_URL="https://github.com/${GITHUB_REPOSITORY}/compare/main...${PROMO_BRANCH}?expand=1"
+          echo "If gh times out, open the PR in the browser:"
+          echo "$COMPARE_URL"
+
           echo "Checking for an existing promotion PR..."
-          EXISTING_PR=$(gh pr list \
-            --base main \
-            --head "$PROMO_BRANCH" \
-            --state open \
-            --json number \
-            --jq '.[0].number // empty')
+          EXISTING_PR=""
+          for i in 1 2 3; do
+            if EXISTING_PR=$(gh pr list \
+              --base main \
+              --head "$PROMO_BRANCH" \
+              --state open \
+              --json number \
+              --jq '.[0].number // empty'); then
+              break
+            fi
+            echo "gh pr list failed (attempt $i); retrying..."
+            sleep $((i * 10))
+          done
 
           if [[ -n "$EXISTING_PR" ]]; then
             echo "Promotion PR #${EXISTING_PR} already exists."
           else
             echo "Creating PR from $PROMO_BRANCH -> main..."
-            gh pr create \
-              --base main \
-              --head "$PROMO_BRANCH" \
-              --title "$PROMOTE_TITLE" \
-              --body-file body.md
+            PR_CREATED=0
+            for i in 1 2 3 4 5; do
+              if gh pr create \
+                --base main \
+                --head "$PROMO_BRANCH" \
+                --title "$PROMOTE_TITLE" \
+                --body-file body.md; then
+                PR_CREATED=1
+                break
+              fi
+              echo "gh pr create failed (attempt $i); retrying..."
+              sleep $((i * 15))
+            done
+            if [[ "$PR_CREATED" -ne 1 ]]; then
+              echo "::warning::gh pr create timed out, but the promote branch is on the remote."
+              echo "::warning::Open this URL to create the PR: $COMPARE_URL"
+              echo "Promote branch: $PROMO_BRANCH"
+              exit 0
+            fi
           fi

@@ -7,17 +7,23 @@ This repository implements a multi-environment CI/CD pipeline for dbt on Snowfla
 ## Branching Strategy
 
 ```
-feature/*  ──PR──►  test  ──PR──►  main
-                      │               │
-                   TEST +          PROD
+feature/*  ──PR──►  test  ──[promote] PR──►  main
+                      │                         │
+                   TEST +                     PROD
                   PREPROD
 ```
 
 | Branch | Deploys to | Trigger |
 |---|---|---|
 | `feature/*` | — | PR validation only (`pr-build-validate.yml`) |
-| `test` | TEST → PREPROD | Push / merge to `test` |
-| `main` | PROD | Push / merge to `main` (via test→main PR) |
+| `test` | TEST → PREPROD → opens promote PR to `main` | PR merged into `test` (merge commit), or `workflow_dispatch` |
+| `main` | PROD | Push / merge to `main` only (never a `promote-*` branch) |
+
+**Rules of thumb**
+
+- Feature PRs merge into **`test`** (prefer merge commits, not squash — promote needs both parents).
+- After PREPROD succeeds, CI opens a **`[promote]`** PR into `main` with only that PR’s files (same size or smaller if some files already exist on `main`).
+- PROD runs only when code lands on **`main`**. The Actions branch column must show `main`, not `promote-*`.
 
 ---
 
@@ -26,61 +32,72 @@ feature/*  ──PR──►  test  ──PR──►  main
 | File | Purpose | Trigger |
 |---|---|---|
 | `pr-build-validate.yml` | dbt compile + lint on every PR | `pull_request` to `test` or `main` |
-| `deploy-to-test-preprod.yml` | Selective dbt build → TEST, then PREPROD (approval gate) | Push to `test` |
-| `deploy-to-prod.yml` | Selective dbt build → PROD (approval gate) | Push to `main` |
-| `manual-full-build-deploy-to-test.yml` | Full build of `test` branch → TEST | `workflow_dispatch` only |
-| `manual-full-build-deploy-to-preprod.yml` | Full build of `test` branch → PREPROD | `workflow_dispatch` only |
-| `manual-full-build-deploy-to-prod.yml` | Full build of `main` branch → PROD | `workflow_dispatch` only |
-| `manual-selective-deploy-to-preprod.yml` | Deploy specific models (by selector/branch) → PREPROD | `workflow_dispatch` only |
+| `deploy-to-test-preprod.yml` | Selective build → TEST → PREPROD (approval) → open promote PR to `main` | PR closed/merged into `test`, or `workflow_dispatch` |
+| `deploy-to-prod.yml` | Selective build → PROD (approval gate) | Push to `main`, or `workflow_dispatch` on `main` |
+| `manual-selective-deploy-to-test.yml` | Targeted `dbt build --select` → TEST | `workflow_dispatch` only |
+| `manual-selective-deploy-to-preprod.yml` | Targeted `dbt build --select` → PREPROD | `workflow_dispatch` only |
+| `manual-selective-deploy-to-prod.yml` | Targeted `dbt build --select` → PROD (**always checks out `main`**) | `workflow_dispatch` from `main` only |
+| `manual-full-build-deploy-to-test.yml` | Full build of `test` → TEST | `workflow_dispatch` only |
+| `manual-full-build-deploy-to-preprod.yml` | Full build of `test` → PREPROD | `workflow_dispatch` only |
+| `manual-full-build-deploy-to-prod.yml` | Full build of `main` → PROD | `workflow_dispatch` only |
 
-> **Manual full-build workflows** are disabled by default. Enable them from the GitHub Actions UI when a full baseline rebuild is needed (e.g. first-ever environment setup, environment reset, major macro refactor). After the run completes, disable again. The resulting manifest is saved to cache so the next automated selective build can do accurate state comparison.
+> **Manual full-build workflows** — enable only when needed (baseline / reset / major refactor), then disable again.  
+> **Manual selective workflows** — recovery / targeted rebuild. Prefer keeping unused ones disabled. PROD selective never checks out a `promote-*` or feature branch.
 
 ---
 
 ## Selective Build Approach
 
-All automated deployment workflows use **selective builds** — only the models that directly changed are built and tested. No downstream cascade.
+Automated TEST, PREPROD, and PROD builds are **selective**: only model/snapshot `.sql` files changed by **that PR/merge** are built. No `state:modified` against a stale env manifest (that previously pulled in unrelated failing models). No downstream `+` cascade.
 
-### How it works
+### How selectors are chosen
 
-```
-dbt build
-  --select "state:modified.body state:modified.macros"
-  --state  ./previous-manifest/
-```
-
-| Selector | What it builds |
+| Stage | How models are selected |
 |---|---|
-| `state:modified.body` | Models whose SQL body changed vs. the previous manifest |
-| `state:modified.macros` | Models whose compiled output changed due to a macro change |
+| TEST / PREPROD | Diff of this PR’s merge into `test`: `HEAD^1...HEAD` (same file set as GitHub’s PR “Files changed”). Converted to `path:models/...sql` / `path:snapshots/...sql` relative to the dbt project. |
+| PROD | Diff of the merge into `main`: `HEAD^1...HEAD` (or `HEAD~1...HEAD` if not a merge commit). Same `path:` style. Git always runs from repo root (`git -C $GITHUB_WORKSPACE`) so paths match. |
+| Manual selective | Operator-supplied `dbt --select` expression only. |
 
-> **No `+` suffix** — downstream models are NOT automatically rebuilt. This prevents a single bronze model change from cascading to rebuild 500+ models. PREPROD and PROD also follow the same approach.
+dbt orders selected nodes by **DAG** (`ref` / `source`): bronze → silver → gold → snapshot/tests in one `dbt build`. You do not need separate runs per layer.
 
-### Build types
+YAML / source files travel with the promote PR when they still differ from `main`, but they are **not** passed to `--select`. Extra lines in a shared `_src_*.yml` do not add other PRs’ models to the build.
 
-The pipeline supports two build modes, determined by the PR title prefix:
+### Promote PR creation (`deploy-to-test-preprod.yml`)
 
-| PR title prefix | Build type | What runs |
-|---|---|---|
-| `[promote]` | **selective** | `state:modified.body state:modified.macros` |
-| `[full-build]` | **full** | `path:models+` (all models, with `--full-refresh`) |
+After PREPROD succeeds:
 
-When no prefix matches, the pipeline defaults to **selective**.
+1. Start from `origin/main`.
+2. Prefer `git cherry-pick -m 1` of the TEST merge (this PR’s patch only).
+3. If that conflicts (shared yml / delete-modify), resolve **unmerged paths** with the TEST merge version so the PR still opens — other PRs’ SQL is not added.
+4. Title: `{original PR title} [promote]`.
+5. If `gh pr create` hits a GitHub 504, the job retries, then prints a compare URL (branch is already pushed).
 
-### Manifest caching
+Replay a merged TEST PR without a new engineer PR: **Actions → dandi-datahub-dbt-to-test-preprod → Run workflow** on branch `test`, with:
 
-After each successful build, the `manifest.json` is saved to GitHub Actions cache keyed by `run_id`. The next selective build restores the most recent manifest to compare against, enabling accurate `state:modified` detection.
+- `merge_sha` — full merge commit SHA into `test`
+- `pr_title` — original PR title
 
-If no manifest is found in cache, the pipeline falls back to a **git-diff selector** — extracting changed `.sql` filenames and building those models directly (still selective, not a full build).
+Do **not** dispatch from a feature branch for replay (loads old YAML / wrong diff).
 
-### Permanent excludes
+### What is *not* used for automated selection anymore
 
-Applied on every build (selective and full) across all environments:
+| Old approach | Why it was dropped |
+|---|---|
+| `state:modified` vs env manifest for TEST/PREPROD model pick | Stale PREPROD/PROD manifests rebuilt models from earlier failed PRs |
+| Two-dot `git diff base head` for scope | Listed hundreds of files when the feature branch lagged `test` |
+| Job-output file lists as `--select` | Corrupted multiline paths → dbt matched 0 nodes |
+| PROD trigger on `pull_request` closed into `main` | Actions attributed the run to the `promote-*` head branch |
+
+### Permanent excludes (automated pipelines only)
+
+Still applied on **automated** TEST / PREPROD / PROD and **manual full-build** workflows:
 
 | Exclude | Reason |
 |---|---|
-| `platinum_ai_mosaic_poc_temp_mosaicicssubgroupdetails`<br>`platinum_ai_mosaic_poc_temp_mosaicicsworkflowendsteps`<br>`platinum_ai_mosaic_poc_temp_mosaicicsworkflownextactions`<br>`platinum_ai_mosaic_poc_temp_mosaicicsworkflowsteps`<br>`platinum_ai_mosaic_poc_temp_mosaicorganisations`<br>`platinum_ai_mosaic_poc_temp_mosaicworkers` | POC/temp platinum models — fail column masking policy governance validation. Excluded until production-ready. |
-| `silver_Ezytreev_ordworks,test_name:expression_is_true` | `expression_is_true` test returns failing rows pending upstream data fix. |
+| `platinum_ai_mosaic_poc_temp_*` (listed models) | POC/temp — masking policy governance |
+| `silver_Ezytreev_ordworks,test_name:expression_is_true` | Pending upstream data fix |
+
+**Manual selective** workflows have **no** `--exclude` — the operator’s selector is the full scope.
 
 ---
 
@@ -89,41 +106,72 @@ Applied on every build (selective and full) across all environments:
 ### TEST + PREPROD (`deploy-to-test-preprod.yml`)
 
 ```
-Push to test
+PR merged into test  (or workflow_dispatch with merge_sha)
     │
     ▼
-[build job]
-  dbt parse / compile
-  Determine build type (selective / full) from PR title
+[build]  compile + governance + compute this PR's model list
     │
     ▼
-[deploy_test job]  ── environment: test (no approval)
-  Restore manifest from cache
-  dbt build (selective or full)
-  Save manifest to cache
+[deploy_test]  ── environment: test
+  dbt build --select path:<this PR's sql...>
+  HTML report (models + snapshots + tests)
   snow dbt deploy → TEST_DATATRANSFORMATIONS
     │
     ▼
-[deploy_preprod job]  ── environment: preprod (approval required)
-  Restore manifest from cache
-  dbt build (selective or full, mirrors TEST)
-  Save manifest to cache
+[deploy_preprod]  ── environment: preprod (approval)
+  Same commit + same selectors as TEST
   snow dbt deploy → PREPROD_DATATRANSFORMATIONS
+    │
+    ▼
+[promote_tested_commit_to_main]
+  Branch promote-<sha> from main + this PR's files only
+  Open PR → main  title: "... [promote]"
 ```
 
 ### PROD (`deploy-to-prod.yml`)
 
 ```
-Push to main (via [promote] PR from test)
+Push to main  (merge of a [promote] PR)  — github.ref must be refs/heads/main
     │
     ▼
-[prod_deploy_run job]  ── environment: prod (approval required)
-  Download build type from unified pipeline artifact
-  Restore PROD manifest from cache
-  dbt build (selective or full, mirrors TEST/PREPROD)
-  Save PROD manifest to cache
+[prod_deploy_run]  ── environment: prod (approval)
+  Selective path: selectors from this main merge's SQL files
+  If no SQL (yml-only promote): skip dbt build/report; still snow dbt deploy
   snow dbt deploy → PROD_DATATRANSFORMATIONS
 ```
+
+Notes:
+
+- Missing artifact `pipeline-build-meta` on PROD is **expected** (different workflow run). Job defaults to selective.
+- Re-running an old failed PROD job does **not** pick up a newer `deploy-to-prod.yml` (pinned to the original commit SHA). Put the workflow on `main` first, then start a **new** run.
+
+### Manual selective recovery
+
+| Workflow | Checkout | Use when |
+|---|---|---|
+| `manual-selective-deploy-to-test` | Input `branch` (prefer `test`) | Targeted TEST rebuild |
+| `manual-selective-deploy-to-preprod` | Input `branch` | Targeted PREPROD rebuild |
+| `manual-selective-deploy-to-prod` | **Always `main`** | Rebuild models already on `main` after a missed selective PROD run |
+
+Example PROD selector (one line, specific files — avoid directory wildcards unless intentional):
+
+```text
+path:models/bronze_adf/.../foo.sql path:models/silver/.../bar.sql path:models/gold/.../baz.sql path:snapshots/.../snp_....sql
+```
+
+Or model names: `bronze_... silver_... gold_... snp_...`
+
+`path:snapshots/some_folder/` selects **all** snapshots in that folder — prefer the specific `.sql` file.
+
+---
+
+## HTML build report (`scripts/dbt_report.py`)
+
+Generates `dbt_test_report.html` from `run_results.json` / `manifest.json`.
+
+Includes **models, snapshots, seeds, and tests**. Snapshot failures mark the report **FAILED** (not a green report that only listed models/tests).
+
+If no `run_results.json` exists (nothing was built — e.g. yml-only promote), the script exits 0 / report steps are skipped so PROD can still finish `snow dbt deploy`.
 
 ---
 
@@ -131,11 +179,9 @@ Push to main (via [promote] PR from test)
 
 | Scope | Timeout |
 |---|---|
-| `deploy_test` job | 360 min |
-| `deploy_preprod` job | 360 min |
-| `prod_deploy_run` job | 360 min |
+| `deploy_test` / `deploy_preprod` / `prod_deploy_run` | 360 min |
 | dbt build step (all environments) | 340 min |
-| Manual full-build job + step | 360 / 340 min |
+| Manual full-build / selective jobs | 360 min (build step 340) |
 
 ---
 
@@ -145,25 +191,24 @@ Push to main (via [promote] PR from test)
 snowflake-dbt/
 ├── .github/workflows/          GitHub Actions workflows
 ├── datahub_refinery/           dbt project root
-│   ├── dbt_project.yml         dbt project configuration
-│   ├── profiles.yml            Snowflake connection profiles
-│   ├── packages.yml            dbt package dependencies
-│   ├── models/                 dbt models (bronze_adf, silver, gold, platinum)
-│   ├── macros/                 custom dbt macros
-│   ├── seeds/                  seed data files
-│   ├── snapshots/              snapshot models
-│   └── tests/                  custom data tests
+│   ├── dbt_project.yml
+│   ├── profiles.yml
+│   ├── packages.yml
+│   ├── models/                 bronze_adf, silver, gold, platinum
+│   ├── macros/
+│   ├── seeds/
+│   ├── snapshots/
+│   └── tests/
 ├── scripts/
-│   ├── validate_metadata.py    governance metadata validator (tags, owner, classification)
-│   └── dbt_report.py           generates HTML test report from run_results.json
-└── README/                     documentation
+│   ├── validate_metadata.py    governance (tags, owner, classification)
+│   └── dbt_report.py           HTML build report (models + snapshots + tests)
+└── README/
+    └── README-CICD.md
 ```
 
 ---
 
 ## Database-per-Layer Architecture
-
-Each environment follows this pattern:
 
 | Layer | Database pattern |
 |---|---|
@@ -175,7 +220,7 @@ Each environment follows this pattern:
 
 Where `<ENV>` is `TEST`, `PREPROD`, or `PROD`.
 
-The `generate_schema_name` macro enforces that the schema = the 2nd folder name under `models/` (e.g. `models/bronze_adf/airbnb/` → schema `AIRBNB`).
+`generate_schema_name` sets schema from the 2nd folder under `models/` (e.g. `models/bronze_adf/airbnb/` → `AIRBNB`).
 
 ---
 
@@ -186,8 +231,8 @@ The `generate_schema_name` macro enforces that the schema = the 2nd folder name 
 | Environment | Approval required |
 |---|---|
 | `test` | No |
-| `preprod` | Yes — set reviewers under Settings → Environments |
-| `prod` | Yes — set reviewers under Settings → Environments |
+| `preprod` | Yes |
+| `prod` | Yes |
 
 ### Secrets (per environment)
 
@@ -195,54 +240,65 @@ The `generate_schema_name` macro enforces that the schema = the 2nd folder name 
 |---|---|
 | `SNOWFLAKE_ACCOUNT` | Snowflake account identifier |
 | `SNOWFLAKE_USER` | Service account username |
-| `SNOWFLAKE_ROLE` | Role for the user |
-| `SNOWFLAKE_WAREHOUSE` | Warehouse to use |
+| `SNOWFLAKE_ROLE` | Role |
+| `SNOWFLAKE_WAREHOUSE` | Warehouse |
 | `SNOWFLAKE_DB` | Target database (e.g. `TEST_SILVER`) |
 | `SNOWFLAKE_SCHEMA` | Default schema |
-| `SNOWFLAKE_PRIVATE_KEY` | PEM-encoded RSA private key (not base64) |
-| `SNOWFLAKE_KEY_PASSPHRASE` | RSA key passphrase (if encrypted) |
-| `SNOWFLAKE_DBT_DATABASE` | dbt project store database (e.g. `DBTCENTRAL`) |
-| `SNOWFLAKE_DBT_SCHEMA` | dbt project store schema (e.g. `TEST_DATATRANSFORMATIONS`) |
+| `SNOWFLAKE_PRIVATE_KEY` | PEM RSA private key (not base64) |
+| `SNOWFLAKE_KEY_PASSPHRASE` | Key passphrase if encrypted |
+| `SNOWFLAKE_DBT_DATABASE` | dbt project store DB (e.g. `DBTCENTRAL`) |
+| `SNOWFLAKE_DBT_SCHEMA` | dbt project store schema |
 
 ---
 
 ## Governance Validation
 
-Every workflow runs `scripts/validate_metadata.py` before any dbt build. This script enforces that every model YAML has:
-- `tags:` — at least one tag
-- `owner:` — model owner defined in `meta:`
-- `classification:` — data classification defined in `meta:`
-
-Builds are blocked if any model fails governance validation.
+Every deploy workflow runs `scripts/validate_metadata.py` before dbt build. Every model YAML must have `tags`, `owner`, and `classification` in `meta`. Failures block the pipeline.
 
 ---
 
 ## Troubleshooting
 
-### Selective build rebuilds too many models
+### PROD run shows on a `promote-*` branch
 
-**Cause:** The manifest in cache is stale (old run) or no manifest was found, causing git-diff fallback.
+**Cause:** Old workflow triggered on `pull_request` closed into `main`.  
+**Fix:** `deploy-to-prod.yml` must use `push` to `main` + `if: github.ref == 'refs/heads/main'`. Ensure that file is on `main`.
 
-**Solution:** If the git-diff fallback selector produces more models than expected, check whether a widely-used source YAML file was modified (source changes can cascade). For a full baseline reset, run the manual full-build workflow.
+### PROD says “No model/snapshot SQL changes” but the promote PR has SQL
 
-### "Nothing to do" on selective build
+**Cause:** Selective step ran with `working-directory: datahub_refinery` while grepping for `datahub_refinery/models/...` paths.  
+**Fix:** Prod selector must use `git -C "$GITHUB_WORKSPACE"`. Re-run of the **old** failed job will not pick up the fix — put YAML on `main`, then a **new** run (or manual selective PROD with model names).
 
-**Cause:** The changed files are YAML-only (schema, descriptions, tests) with no SQL body changes. The `state:modified.body` selector correctly finds nothing.
+### Promote job: cherry-pick conflict on shared `_src_*.yml`
 
-**Solution:** This is expected behaviour. The pipeline falls back to the git-diff selector automatically. If the git-diff also finds no `.sql` files changed, the build exits cleanly.
+**Cause:** Isolated promote onto `main` vs overlapping TEST changes.  
+**Fix:** Current promote step resolves conflicts with TEST versions of unmerged paths and still opens the PR. Paste latest `deploy-to-test-preprod.yml` on `test`. Do not “Re-run” an old promote job that still has the old YAML.
 
-### "Does not match any enabled nodes"
+### Promote job: `gh pr create` HTTP 504
 
-**Cause:** A model name in the `--select` or `--exclude` flag doesn't exist in the current project (renamed, deleted, or path issue).
+**Cause:** GitHub API timeout. Branch is usually already pushed.  
+**Fix:** Open the compare URL printed in the log, or rely on retries in the latest workflow.
 
-**Solution:** Verify the model name matches exactly (case-sensitive). Check that `dbt_project.yml` `model-paths` is set to `["models"]`.
+### Replay / dispatch did not create a new promote PR
 
-### Manual full-build workflow — when to use
+**Cause:** Those files are already on `main` (“Nothing to promote”), or promote branch already exists.  
+**Fix:** For PROD rebuild use `manual-selective-deploy-to-prod` on `main` with an explicit selector (not the promote branch).
 
-Use the manual full-build workflows when:
-- Setting up a new environment from scratch
-- After a long period of selective-only builds and data drift is suspected
-- After a major macro refactor that affects many models
-- Recovering from a corrupted environment
+### HTML report green but job failed on a snapshot
 
-Enable from GitHub Actions → select workflow → Enable workflow. Disable again after the run completes.
+**Cause:** Older `dbt_report.py` ignored snapshots.  
+**Fix:** Current report includes snapshots/seeds; snapshot errors mark FAILED.
+
+### ADF / landing object does not exist in PROD
+
+**Cause:** Upstream landing table not deployed (`PROD_LANDING_ADF...`).  
+**Fix:** Deploy ADF/landing first, then re-run PROD. Not a selector bug.
+
+### Manual full-build — when to use
+
+- New environment baseline  
+- Suspected drift after long selective-only history  
+- Major macro refactor  
+- Environment recovery  
+
+Enable → run → disable. Prefer **manual selective** when only a few models need a PROD rebuild.

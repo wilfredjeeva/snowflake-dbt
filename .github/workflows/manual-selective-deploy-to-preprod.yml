@@ -137,10 +137,10 @@ jobs:
           echo "Starting targeted PREPROD build - $(date -u)"
           echo "Branch   : ${{ inputs.branch }}"
           echo "Selector : ${{ inputs.dbt_selector }}"
+          # dbt orders by DAG (bronze → silver → gold → snapshot/tests).
+          # No --exclude: selector is explicit; excluded models are never selected.
           dbt build \
             --select "${{ inputs.dbt_selector }}" \
-            --exclude "platinum_ai_mosaic_poc_temp_mosaicicssubgroupdetails platinum_ai_mosaic_poc_temp_mosaicicsworkflowendsteps platinum_ai_mosaic_poc_temp_mosaicicsworkflownextactions platinum_ai_mosaic_poc_temp_mosaicicsworkflowsteps platinum_ai_mosaic_poc_temp_mosaicorganisations platinum_ai_mosaic_poc_temp_mosaicworkers" \
-            --exclude "silver_Ezytreev_ordworks,test_name:expression_is_true" \
             --target preprod \
             --no-fail-fast \
             --profiles-dir .

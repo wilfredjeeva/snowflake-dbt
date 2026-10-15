@@ -34,8 +34,14 @@ def load_json(path: Path) -> dict:
     with open(path, encoding="utf-8") as fh:
         return json.load(fh)
 
+# YAML-only / "nothing to build" runs never create run_results.json.
+# Exit 0 so CI can still finish snow dbt deploy.
+if not RUN_RESULTS_PATH.exists():
+    print(f"[WARN] {RUN_RESULTS_PATH} not found — no dbt build ran; skipping HTML report.")
+    sys.exit(0)
+
 run_results = load_json(RUN_RESULTS_PATH)
-manifest    = load_json(MANIFEST_PATH)
+manifest    = load_json(MANIFEST_PATH) if MANIFEST_PATH.exists() else {"nodes": {}}
 
 # ── Parse results ──────────────────────────────────────────────────────────────
 results        = run_results.get("results", [])

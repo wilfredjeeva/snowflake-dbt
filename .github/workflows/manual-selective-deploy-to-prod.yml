@@ -1,0 +1,188 @@
+# Manual selective deploy - specific models -> PROD
+# Purpose  : Rebuild models already on main when an automated prod selective
+#             run missed them (e.g. workflow bug). Emergency / recovery only.
+# Trigger  : Manual only (workflow_dispatch). Prefer keeping this workflow
+#             disabled when unused; enable from the Actions UI when needed.
+#
+# SAFETY: Always checks out main. Do NOT point this at a promote-* or feature
+# branch — that can deploy code that is not what main currently is.
+# Pick models with dbt_selector (names or path:...).
+
+name: manual-selective-deploy-to-prod
+
+on:
+  workflow_dispatch:
+    inputs:
+      dbt_selector:
+        description: >
+          dbt --select from current main. Prefer exact model/snapshot names or .sql paths.
+          Avoid folder paths like path:models/gold/elections/.
+        required: true
+      dbt_exclude:
+        description: >
+          Optional dbt --exclude. To skip DimElectionParties tests:
+          test_dimelectionparties_data_validation test_dimelectionparties_record_count
+        required: false
+        default: ""
+      reason:
+        description: "Reason for this targeted PROD deploy (required for audit)"
+        required: true
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  selective_deploy_prod:
+    name: "Selective PROD  [${{ inputs.dbt_selector }}]"
+    runs-on: ubuntu-latest
+    environment: prod
+    timeout-minutes: 360
+    # Hard guard: workflow file must be run from main (dispatch UI branch = main).
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Log deploy parameters
+        run: |
+          echo "=================================================="
+          echo "  SELECTIVE PROD DEPLOY (main only)"
+          echo "  Ref      : main (forced checkout)"
+          echo "  Selector : ${{ inputs.dbt_selector }}"
+          echo "  Exclude  : ${{ inputs.dbt_exclude }}"
+          echo "  Reason   : ${{ inputs.reason }}"
+          echo "  Actor    : ${{ github.actor }}"
+          echo "=================================================="
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip dependencies
+        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-dbt-${{ hashFiles('**/packages.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-dbt-
+
+      - name: Install dbt and Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install dbt-core==1.9.4 dbt-snowflake==1.9.2 pyyaml "snowflake-cli==3.13.1"
+
+      - name: Write Snowflake private key
+        run: |
+          printf '%s' "${{ secrets.SNOWFLAKE_PRIVATE_KEY }}" > $HOME/sf_key.p8
+          chmod 600 $HOME/sf_key.p8
+
+      - name: Validate governance metadata (tags, owner, classification)
+        run: python scripts/validate_metadata.py
+
+      - name: Install dbt packages
+        run: |
+          cd datahub_refinery
+          dbt deps --target prod
+
+      - name: Write CI profiles.yml (prod)
+        env:
+          SF_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SF_USER: ${{ secrets.SNOWFLAKE_USER }}
+          SF_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
+          SF_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+          SF_DB: ${{ secrets.SNOWFLAKE_DB }}
+          SF_SCHEMA: ${{ secrets.SNOWFLAKE_SCHEMA }}
+          SF_PASSPHRASE: ${{ secrets.SNOWFLAKE_KEY_PASSPHRASE }}
+        run: |
+          python3 - << 'PYEOF'
+          import os, pathlib, json
+          e = os.environ
+          content = f"""datahub_refinery:
+            target: prod
+            outputs:
+              prod:
+                type: snowflake
+                account: {json.dumps(e['SF_ACCOUNT'])}
+                user: {json.dumps(e['SF_USER'])}
+                role: {json.dumps(e['SF_ROLE'])}
+                warehouse: {json.dumps(e['SF_WAREHOUSE'])}
+                database: {json.dumps(e['SF_DB'])}
+                schema: {json.dumps(e['SF_SCHEMA'])}
+                private_key_path: "/home/runner/sf_key.p8"
+                private_key_passphrase: {json.dumps(e['SF_PASSPHRASE'])}
+                threads: 8
+                client_session_keep_alive: true
+                client_session_keep_alive_heartbeat_frequency: 900
+          """
+          pathlib.Path("datahub_refinery/profiles.yml").write_text(content)
+          print("CI profiles.yml written for prod.")
+          PYEOF
+
+      - name: "dbt build (selective) to PROD"
+        timeout-minutes: 340
+        working-directory: datahub_refinery
+        run: |
+          set -euo pipefail
+          echo "Selector: ${{ inputs.dbt_selector }}"
+          echo "Exclude : ${{ inputs.dbt_exclude }}"
+          # dbt orders by DAG. Parties singular tests can still enter the graph
+          # when they share refs/tags with Candidates — use dbt_exclude to skip them.
+          if [ -n "${{ inputs.dbt_exclude }}" ]; then
+            dbt build \
+              --select ${{ inputs.dbt_selector }} \
+              --exclude ${{ inputs.dbt_exclude }} \
+              --target prod \
+              --no-fail-fast \
+              --profiles-dir .
+          else
+            dbt build \
+              --select ${{ inputs.dbt_selector }} \
+              --target prod \
+              --no-fail-fast \
+              --profiles-dir .
+          fi
+
+      - name: Generate dbt test HTML report
+        if: always() && hashFiles('datahub_refinery/target/run_results.json') != ''
+        run: python scripts/dbt_report.py
+
+      - name: Upload dbt test report
+        if: always() && hashFiles('dbt_test_report.html') != ''
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
+        with:
+          name: "dbt_report_prod_selective_${{ github.run_id }}"
+          path: dbt_test_report.html
+          if-no-files-found: warn
+
+      - name: Clean dbt artifacts before Snowflake deploy
+        run: |
+          rm -rf "$GITHUB_WORKSPACE/datahub_refinery/target"
+          rm -rf "$GITHUB_WORKSPACE/datahub_refinery/logs"
+
+      - name: Deploy dbt project object to Snowflake (PROD)
+        env:
+          PRIVATE_KEY_PASSPHRASE: ${{ secrets.SNOWFLAKE_KEY_PASSPHRASE }}
+        run: |
+          mkdir -p ~/.snowflake
+          cat > ~/.snowflake/config.toml <<'EOF'
+          default_connection_name = "ci"
+          [connections.ci]
+          account = "${{ secrets.SNOWFLAKE_ACCOUNT }}"
+          user = "${{ secrets.SNOWFLAKE_USER }}"
+          role = "${{ secrets.SNOWFLAKE_ROLE }}"
+          warehouse = "${{ secrets.SNOWFLAKE_WAREHOUSE }}"
+          database = "${{ secrets.SNOWFLAKE_DBT_DATABASE }}"
+          schema = "${{ secrets.SNOWFLAKE_DBT_SCHEMA }}"
+          authenticator = "SNOWFLAKE_JWT"
+          private_key_path = "/home/runner/sf_key.p8"
+          EOF
+          chmod 0600 ~/.snowflake/config.toml
+          snow dbt deploy "PROD_DATATRANSFORMATIONS" \
+            --source "$GITHUB_WORKSPACE/datahub_refinery" \
+            --profiles-dir "$GITHUB_WORKSPACE/datahub_refinery" \
+            --default-target prod \
+            --force

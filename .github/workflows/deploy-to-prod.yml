@@ -185,19 +185,29 @@ jobs:
               --profiles-dir .
 
           else
-            # SELECTIVE: build exactly what the merged promote PR changed.
-            # After a promote PR merge, HEAD is the merge commit and HEAD~1 is main
-            # before the merge, so this diff is the promote PR's own file list.
-            # Direct changes only (no "+" downstream cascade), mirroring TEST/PREPROD.
-            # Deleted files are ignored.
-            echo "SELECTIVE build - models/snapshots changed in merge commit $(git rev-parse --short HEAD) (direct changes only)"
-            git diff --name-status --diff-filter=d HEAD~1 HEAD || true
-            mapfile -t SELS < <(git diff --name-only --diff-filter=d HEAD~1 HEAD \
+            # This step runs with working-directory: datahub_refinery.
+            # Always git -C "$GITHUB_WORKSPACE" so paths stay
+            # datahub_refinery/models/... — otherwise grep never matches
+            # and every selective PROD run says "nothing to build".
+            GIT=(git -C "$GITHUB_WORKSPACE")
+            if "${GIT[@]}" rev-parse -q --verify HEAD^2 >/dev/null; then
+              echo "Selector source: merge-commit diff HEAD^1...HEAD"
+              BASE=HEAD^1
+              TIP=HEAD
+            else
+              echo "Selector source: HEAD~1...HEAD"
+              BASE=HEAD~1
+              TIP=HEAD
+            fi
+            echo "SELECTIVE build - models/snapshots in $("${GIT[@]}" rev-parse --short HEAD) (direct changes only)"
+            "${GIT[@]}" diff --name-status --diff-filter=d "$BASE" "$TIP" || true
+            mapfile -t SELS < <("${GIT[@]}" diff --name-only --diff-filter=d "$BASE" "$TIP" \
               | sed 's/\r$//' \
               | grep -E '^datahub_refinery/(models|snapshots)/.*\.sql$' \
               | sed 's|^datahub_refinery/||;s|^|path:|' || true)
             if [ ${#SELS[@]} -eq 0 ]; then
               echo "No model/snapshot SQL changes in this merge - nothing to build"
+              echo "YAML/docs-only promote is OK; snow dbt deploy will still update the project object."
               exit 0
             fi
             echo "Git-derived path selectors (${#SELS[@]}):"
@@ -214,12 +224,14 @@ jobs:
             exit "$DBT_EXIT"
           fi
 
+      # Skip when nothing was built (yml-only promote). Missing run_results
+      # must not fail the job or skip snow dbt deploy.
       - name: Generate dbt test HTML report
-        if: always()
+        if: always() && hashFiles('datahub_refinery/target/run_results.json') != ''
         run: python scripts/dbt_report.py
 
       - name: Upload dbt test report
-        if: always()
+        if: always() && hashFiles('dbt_test_report.html') != ''
         uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
         with:
           name: dbt_test_report_prod
@@ -227,20 +239,20 @@ jobs:
           if-no-files-found: warn
 
       - name: Save manifest to cache for next selective build
-        if: always()
+        if: always() && hashFiles('datahub_refinery/target/manifest.json') != ''
         run: |
           mkdir -p previous-manifest
           cp datahub_refinery/target/manifest.json previous-manifest/ 2>/dev/null || true
 
       - name: Cache PROD manifest for next selective build
-        if: always()
+        if: always() && hashFiles('previous-manifest/manifest.json') != ''
         uses: actions/cache/save@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
         with:
           path: previous-manifest/manifest.json
           key: dbt-manifest-prod-${{ github.run_id }}
 
       - name: Upload dbt artifacts
-        if: always()
+        if: always() && hashFiles('datahub_refinery/target/manifest.json') != ''
         uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
         with:
           name: dbt_artifacts_prod

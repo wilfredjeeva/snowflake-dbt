@@ -15,6 +15,7 @@ feature/*  ──PR──►  test  ──[promote] PR──►  main
 
 | Branch | Deploys to | Trigger |
 |---|---|---|
+| `feature/*` | DEV (optional, manual) | `manual-selective-deploy-to-dev` — `workflow_dispatch` |
 | `feature/*` | — | PR validation only (`pr-build-validate.yml`) |
 | `test` | TEST → PREPROD → opens promote PR to `main` | PR merged into `test` (merge commit), or `workflow_dispatch` |
 | `main` | PROD | Push / merge to `main` only (never a `promote-*` branch) |
@@ -34,6 +35,7 @@ feature/*  ──PR──►  test  ──[promote] PR──►  main
 | `pr-build-validate.yml` | dbt compile + lint on every PR | `pull_request` to `test` or `main` |
 | `deploy-to-test-preprod.yml` | Selective build → TEST → PREPROD (approval) → open promote PR to `main` | PR closed/merged into `test`, or `workflow_dispatch` |
 | `deploy-to-prod.yml` | Selective build → PROD (approval gate) | Push to `main`, or `workflow_dispatch` on `main` |
+| `manual-selective-deploy-to-dev.yml` | Targeted (or full) `dbt build` → DEV from a **feature branch** | `workflow_dispatch` only |
 | `manual-selective-deploy-to-test.yml` | Targeted `dbt build --select` → TEST | `workflow_dispatch` only |
 | `manual-selective-deploy-to-preprod.yml` | Targeted `dbt build --select` → PREPROD | `workflow_dispatch` only |
 | `manual-selective-deploy-to-prod.yml` | Targeted `dbt build --select` → PROD (**always checks out `main`**) | `workflow_dispatch` from `main` only |
@@ -145,10 +147,27 @@ Notes:
 - Missing artifact `pipeline-build-meta` on PROD is **expected** (different workflow run). Job defaults to selective.
 - Re-running an old failed PROD job does **not** pick up a newer `deploy-to-prod.yml` (pinned to the original commit SHA). Put the workflow on `main` first, then start a **new** run.
 
+### Manual selective DEV (feature branches)
+
+Use **`manual-selective-deploy-to-dev`** when a developer would otherwise run models in the Snowflake/dbt DEV VM. Actions keeps going if the laptop/VM disconnects.
+
+| Input | Purpose |
+|---|---|
+| **Use workflow from** (branch dropdown) | The feature branch that is checked out and built. This workflow file must exist on that branch — merge/rebase `test` into the feature branch once after this YAML lands. |
+| `run_title` | Becomes the Actions **run name** in the list (and the job label). |
+| `dbt_selector` | `dbt --select`. Blank = entire project. Prefer exact model/snapshot names or `.sql` paths. Do not list YAML / singular test files. |
+| `dbt_exclude` | Optional `dbt --exclude` (hitchhiker tests). |
+| `reason` | Audit note (ticket / what you are testing). |
+
+This job **does not** run `snow dbt deploy` (that would overwrite a shared DEV dbt project object from unfinished feature branches). It only `dbt build`s into Snowflake DEV.
+
+DEV is a **shared** warehouse/database. Two developers running at once can collide. This is not a replacement for merging to `test`.
+
 ### Manual selective recovery
 
 | Workflow | Checkout | Use when |
 |---|---|---|
+| `manual-selective-deploy-to-dev` | Branch dropdown (**Use workflow from**) | Feature-branch models in Snowflake DEV |
 | `manual-selective-deploy-to-test` | Input `branch` (prefer `test`) | Targeted TEST rebuild |
 | `manual-selective-deploy-to-preprod` | Input `branch` | Targeted PREPROD rebuild |
 | `manual-selective-deploy-to-prod` | **Always `main`** | Rebuild models already on `main` after a missed selective PROD run |
@@ -173,6 +192,16 @@ Includes **models, snapshots, seeds, and tests**. Snapshot failures mark the rep
 
 If no `run_results.json` exists (nothing was built — e.g. yml-only promote), the script exits 0 / report steps are skipped so PROD can still finish `snow dbt deploy`.
 
+The report also shows:
+
+- Run context (title, env, branch, SHA, actor, selector, exclude, elapsed time)
+- **Needs attention** panel at the top (FAIL vs ERROR, with the SQL message)
+- Relation (`database.schema.table`), materialization, layer, rows affected
+- Test **failing-row count** and a separate test **Errors** card (compile / missing object vs assertion FAIL)
+- Search + filters (all / problems / FAIL / ERROR)
+
+DEV runs also upload `run_results.json` + `manifest.json` as an artifact.
+
 ---
 
 ## Timeouts
@@ -181,7 +210,7 @@ If no `run_results.json` exists (nothing was built — e.g. yml-only promote), t
 |---|---|
 | `deploy_test` / `deploy_preprod` / `prod_deploy_run` | 360 min |
 | dbt build step (all environments) | 340 min |
-| Manual full-build / selective jobs | 360 min (build step 340) |
+| Manual full-build / selective jobs (incl. DEV) | 360 min (build step 340) |
 
 ---
 
@@ -218,7 +247,7 @@ snowflake-dbt/
 | Gold | `<ENV>_GOLD` |
 | Platinum | `<ENV>_PLATINUM` |
 
-Where `<ENV>` is `TEST`, `PREPROD`, or `PROD`.
+Where `<ENV>` is `DEV`, `TEST`, `PREPROD`, or `PROD`.
 
 `generate_schema_name` sets schema from the 2nd folder under `models/` (e.g. `models/bronze_adf/airbnb/` → `AIRBNB`).
 
@@ -230,9 +259,12 @@ Where `<ENV>` is `TEST`, `PREPROD`, or `PROD`.
 
 | Environment | Approval required |
 |---|---|
+| `DEV` | No (feature-branch builds) |
 | `test` | No |
 | `preprod` | Yes |
 | `prod` | Yes |
+
+The DEV workflow uses `environment: DEV` to match the GitHub Environment name. If secrets are not found, the environment name in the YAML must match Settings → Environments exactly.
 
 ### Secrets (per environment)
 
@@ -246,8 +278,8 @@ Where `<ENV>` is `TEST`, `PREPROD`, or `PROD`.
 | `SNOWFLAKE_SCHEMA` | Default schema |
 | `SNOWFLAKE_PRIVATE_KEY` | PEM RSA private key (not base64) |
 | `SNOWFLAKE_KEY_PASSPHRASE` | Key passphrase if encrypted |
-| `SNOWFLAKE_DBT_DATABASE` | dbt project store DB (e.g. `DBTCENTRAL`) |
-| `SNOWFLAKE_DBT_SCHEMA` | dbt project store schema |
+| `SNOWFLAKE_DBT_DATABASE` | dbt project store DB (e.g. `DBTCENTRAL`) — **not required for DEV** (no `snow dbt deploy`) |
+| `SNOWFLAKE_DBT_SCHEMA` | dbt project store schema — **not required for DEV** |
 
 ---
 
@@ -293,6 +325,11 @@ Every deploy workflow runs `scripts/validate_metadata.py` before dbt build. Ever
 
 **Cause:** Upstream landing table not deployed (`PROD_LANDING_ADF...`).  
 **Fix:** Deploy ADF/landing first, then re-run PROD. Not a selector bug.
+
+### DEV workflow is missing from the branch dropdown
+
+**Cause:** `manual-selective-deploy-to-dev.yml` is not on that feature branch yet.  
+**Fix:** Merge or rebase `test` (once this file is on `test`) into the feature branch, then select it under **Use workflow from**.
 
 ### Manual full-build — when to use
 

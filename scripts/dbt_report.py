@@ -6,6 +6,10 @@ Reads dbt's target/run_results.json and target/manifest.json and generates
 a self-contained HTML build report showing both model and test results —
 equivalent to the dbt Cloud native report view.
 
+Optional env vars (DEV / CI context for DEs):
+    DBT_REPORT_TITLE, DBT_REPORT_ENV, DBT_REPORT_BRANCH, DBT_REPORT_SHA,
+    DBT_REPORT_ACTOR, DBT_REPORT_SELECTOR, DBT_REPORT_EXCLUDE, DBT_REPORT_REASON
+
 Usage (from repo root):
     python scripts/dbt_report.py
 
@@ -15,7 +19,9 @@ Outputs:
 Requires no third-party libraries.
 """
 
+import html
 import json
+import os
 import sys
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -26,13 +32,58 @@ RUN_RESULTS_PATH = TARGET_DIR / "run_results.json"
 MANIFEST_PATH    = TARGET_DIR / "manifest.json"
 OUTPUT_PATH      = Path("dbt_test_report.html")
 
-# ── Load files ─────────────────────────────────────────────────────────────────
+
+def esc(value) -> str:
+    return html.escape(str(value if value is not None else ""), quote=True)
+
+
+def env_meta(key: str, fallback: str = "") -> str:
+    return (os.environ.get(key) or fallback).strip()
+
+
+def infer_layer(path: str, resource_type: str) -> str:
+    p = (path or "").replace("\\", "/").lower()
+    if resource_type == "snapshot" or "/snapshots/" in p:
+        return "snapshot"
+    if "/bronze" in p:
+        return "bronze"
+    if "/silver" in p:
+        return "silver"
+    if "/gold" in p:
+        return "gold"
+    if "/platinum" in p:
+        return "platinum"
+    if resource_type == "seed":
+        return "seed"
+    if resource_type == "test":
+        return "test"
+    return resource_type or "—"
+
+
+def fmt_seconds(seconds) -> str:
+    try:
+        seconds = float(seconds or 0)
+    except (TypeError, ValueError):
+        return "—"
+    if seconds >= 3600:
+        h = int(seconds // 3600)
+        m = int((seconds % 3600) // 60)
+        s = int(seconds % 60)
+        return f"{h}h {m}m {s}s"
+    if seconds >= 60:
+        m = int(seconds // 60)
+        s = seconds % 60
+        return f"{m}m {s:.1f}s"
+    return f"{seconds:.2f}s"
+
+
 def load_json(path: Path) -> dict:
     if not path.exists():
         print(f"[ERROR] File not found: {path}", file=sys.stderr)
         sys.exit(1)
     with open(path, encoding="utf-8") as fh:
         return json.load(fh)
+
 
 # YAML-only / "nothing to build" runs never create run_results.json.
 # Exit 0 so CI can still finish snow dbt deploy.
@@ -46,6 +97,7 @@ manifest    = load_json(MANIFEST_PATH) if MANIFEST_PATH.exists() else {"nodes": 
 # ── Parse results ──────────────────────────────────────────────────────────────
 results        = run_results.get("results", [])
 manifest_nodes = manifest.get("nodes", {})
+elapsed_time   = run_results.get("elapsed_time")
 
 # Snapshots/seeds fail independently of models; they must appear in the report
 # or a green "PASSED" HTML artefact hides a red dbt build (DHE-3437 DATEKEY).
@@ -63,13 +115,23 @@ for r in model_results:
     node      = manifest_nodes.get(uid, {})
     name      = node.get("name") or uid.split(".")[-1]
     schema    = node.get("schema", "—")
+    database  = node.get("database") or ""
+    alias     = node.get("alias") or name
     node_type = node.get("resource_type", "model").capitalize()
     status    = r.get("status", "unknown")
     exec_time = r.get("execution_time", 0)
-    message   = (r.get("message") or "").replace("<", "&lt;").replace(">", "&gt;")
+    message   = r.get("message") or ""
+    adapter   = r.get("adapter_response") or {}
+    rows_aff  = adapter.get("rows_affected")
+    path      = node.get("original_file_path") or node.get("path") or ""
+    materialized = (node.get("config") or {}).get("materialized") or "—"
+    relation  = ".".join(p for p in (database, schema, alias) if p) or "—"
     model_rows.append({
         "model": name, "type": node_type, "schema": schema,
         "status": status, "exec_time": exec_time, "message": message,
+        "relation": relation, "materialized": materialized,
+        "layer": infer_layer(path, node.get("resource_type", "")),
+        "path": path, "rows": rows_aff, "uid": uid,
     })
 
 # Errors first, then alphabetically
@@ -93,11 +155,14 @@ for r in test_results:
     test_type = node.get("test_metadata", {}).get("name") or node.get("resource_type", "test")
     status    = r.get("status", "unknown")
     exec_time = r.get("execution_time", 0)
-    message   = (r.get("message") or "").replace("<", "&lt;").replace(">", "&gt;")
+    message   = r.get("message") or ""
+    failures  = r.get("failures")
+    path      = node.get("original_file_path") or node.get("path") or ""
     test_rows.append({
         "test_name": test_name, "model": model, "column": column,
         "test_type": test_type, "status": status,
         "exec_time": exec_time, "message": message,
+        "failures": failures, "path": path, "uid": uid,
     })
 
 # Failures first, then by model
@@ -119,6 +184,16 @@ _now_utc = datetime.now(timezone.utc)
 _now_ist = _now_utc + timedelta(hours=5, minutes=30)
 generated_at = f"{_now_ist.strftime('%Y-%m-%d %H:%M:%S IST')} / {_now_utc.strftime('%H:%M:%S GMT')}"
 dbt_version  = run_results.get("metadata", {}).get("dbt_schema_version", "")
+
+report_title    = env_meta("DBT_REPORT_TITLE")
+report_env      = env_meta("DBT_REPORT_ENV")
+report_branch   = env_meta("DBT_REPORT_BRANCH")
+report_sha      = env_meta("DBT_REPORT_SHA")
+report_actor    = env_meta("DBT_REPORT_ACTOR")
+report_selector = env_meta("DBT_REPORT_SELECTOR") or "(entire project)"
+report_exclude  = env_meta("DBT_REPORT_EXCLUDE") or "—"
+report_reason   = env_meta("DBT_REPORT_REASON") or "—"
+short_sha       = report_sha[:12] if report_sha else "—"
 
 # ── Status icons (inline SVG — uniform 16 px, no emoji OS-rendering variance) ──
 _S = 'width="16" height="16" viewBox="0 0 16 16" style="vertical-align:-3px;margin-right:4px;flex-shrink:0;"'
@@ -143,22 +218,98 @@ TEST_ICON  = {"pass": _SVG_OK, "fail": _SVG_FAIL, "error": _SVG_WARN, "warn": _S
 MODEL_CLS  = {"success": "pass", "error": "fail", "skipped": "skipped"}
 TEST_CLS   = {"pass": "pass", "fail": "fail", "error": "error", "warn": "warn", "skipped": "skipped"}
 
+
 def m_icon(s): return MODEL_ICON.get(s, _SVG_UNKN)
 def t_icon(s): return TEST_ICON.get(s, _SVG_UNKN)
 def m_cls(s):  return MODEL_CLS.get(s, "")
 def t_cls(s):  return TEST_CLS.get(s, "")
 
+
+def attention_hint(status: str, message: str) -> str:
+    msg = (message or "").lower()
+    if status == "error" and ("does not exist" in msg or "not authorized" in msg):
+        return "Likely missing upstream table (not a selector typo if this node itself built)."
+    if status == "error" and "number out of representative range" in msg:
+        return "Column type too narrow for the value (snapshot table may need recreate/widen)."
+    if status == "fail":
+        return "Assertion failed (row count / accepted values / uniqueness). Check the message, not an exclude."
+    if status == "error":
+        return "Compile / database error — read the SQL message below."
+    return ""
+
+
+# ── Attention panel ────────────────────────────────────────────────────────────
+attention_items = []
+for row in model_rows:
+    if row["status"] in ("error",):
+        attention_items.append(("build", row["status"], row["model"], row["relation"], row["message"], row["uid"]))
+for row in test_rows:
+    if row["status"] in ("fail", "error"):
+        attention_items.append(("test", row["status"], row["test_name"], row["model"], row["message"], row["uid"]))
+
+attention_html = ""
+if attention_items:
+    cards = []
+    for kind, status, name, extra, message, uid in attention_items:
+        hint = attention_hint(status, message)
+        cards.append(f"""
+        <div class="attn-card {esc(status)}">
+          <div class="attn-head">
+            <span class="attn-kind">{esc(kind)} · {esc(status).upper()}</span>
+            <code>{esc(name)}</code>
+            <span class="attn-extra">{esc(extra)}</span>
+          </div>
+          {f'<div class="attn-hint">{esc(hint)}</div>' if hint else ''}
+          <pre class="attn-msg">{esc(message) or '(no message)'}</pre>
+        </div>""")
+    attention_html = f"""
+  <div class="attention">
+    <div class="summary-label">Needs attention ({len(attention_items)})</div>
+    <p class="attn-note">
+      <strong>ERROR</strong> = compile / missing object / warehouse issue.
+      <strong>FAIL</strong> = the test ran and the data did not meet the assertion.
+      Do not <code>--exclude</code> a FAIL unless a DE has confirmed it is expected.
+    </p>
+    {''.join(cards)}
+  </div>"""
+
+# ── Meta bar ───────────────────────────────────────────────────────────────────
+meta_cells = []
+if report_title:
+    meta_cells.append(("Run title", report_title))
+if report_env:
+    meta_cells.append(("Environment", report_env))
+if report_branch:
+    meta_cells.append(("Branch", report_branch))
+meta_cells.append(("Commit", short_sha))
+if report_actor:
+    meta_cells.append(("Triggered by", report_actor))
+meta_cells.append(("Elapsed", fmt_seconds(elapsed_time) if elapsed_time is not None else "—"))
+meta_cells.append(("Selector", report_selector))
+meta_cells.append(("Exclude", report_exclude))
+if report_reason and report_reason != "—":
+    meta_cells.append(("Reason", report_reason))
+
+meta_html = "".join(
+    f'<div class="meta-cell"><div class="meta-k">{esc(k)}</div><div class="meta-v">{esc(v)}</div></div>'
+    for k, v in meta_cells
+)
+
 # ── Model table rows ───────────────────────────────────────────────────────────
 model_table_html = ""
 for row in model_rows:
     sc  = m_cls(row["status"])
-    msg = f'<span class="msg">{row["message"]}</span>' if row["message"] else ""
+    msg = f'<span class="msg">{esc(row["message"])}</span>' if row["message"] else ""
+    rows_txt = "—" if row["rows"] is None else esc(row["rows"])
     model_table_html += f"""
-      <tr class="{sc}">
-        <td>{m_icon(row["status"])} <code>{row["model"]}</code></td>
-        <td>{row["type"]}</td>
-        <td>{row["schema"]}</td>
-        <td class="status-cell {sc}">{row["status"].upper()}</td>
+      <tr class="{sc}" data-status="{esc(row["status"])}" data-search="{esc((row['model']+' '+row['relation']+' '+row['path']+' '+(row['message'] or '')).lower())}">
+        <td>{m_icon(row["status"])} <code>{esc(row["model"])}</code></td>
+        <td>{esc(row["type"])}</td>
+        <td>{esc(row["layer"])}</td>
+        <td>{esc(row["materialized"])}</td>
+        <td><code>{esc(row["relation"])}</code></td>
+        <td class="status-cell {sc}">{esc(row["status"].upper())}</td>
+        <td>{rows_txt}</td>
         <td>{row["exec_time"]:.2f}s</td>
         <td>{msg}</td>
       </tr>"""
@@ -167,25 +318,29 @@ for row in model_rows:
 test_table_html = ""
 for row in test_rows:
     sc  = t_cls(row["status"])
-    msg = f'<span class="msg">{row["message"]}</span>' if row["message"] else ""
+    msg = f'<span class="msg">{esc(row["message"])}</span>' if row["message"] else ""
+    fail_txt = "—" if row["failures"] is None else esc(row["failures"])
     test_table_html += f"""
-      <tr class="{sc}">
-        <td>{t_icon(row["status"])} <code>{row["test_name"]}</code></td>
-        <td><code>{row["model"]}</code></td>
-        <td>{row["column"]}</td>
-        <td>{row["test_type"]}</td>
-        <td class="status-cell {sc}">{row["status"].upper()}</td>
+      <tr class="{sc}" data-status="{esc(row["status"])}" data-search="{esc((row['test_name']+' '+row['model']+' '+row['column']+' '+(row['message'] or '')).lower())}">
+        <td>{t_icon(row["status"])} <code>{esc(row["test_name"])}</code></td>
+        <td><code>{esc(row["model"])}</code></td>
+        <td>{esc(row["column"])}</td>
+        <td>{esc(row["test_type"])}</td>
+        <td class="status-cell {sc}">{esc(row["status"].upper())}</td>
+        <td>{fail_txt}</td>
         <td>{row["exec_time"]:.2f}s</td>
         <td>{msg}</td>
       </tr>"""
 
+header_sub = esc(report_title) if report_title else "dbt Build Report"
+
 # ── Full HTML ──────────────────────────────────────────────────────────────────
-html = f"""<!DOCTYPE html>
+html_out = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>dbt Build Report</title>
+  <title>{header_sub}</title>
   <link rel="preconnect" href="https://fonts.googleapis.com"/>
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet"/>
@@ -210,7 +365,43 @@ html = f"""<!DOCTYPE html>
       font-weight: 700; font-size: 15px; background: {badge_color}; color: #fff;
       letter-spacing: 1px;
     }}
-    /* Summary panels */
+    .run-title {{ margin-top: 8px; font-size: 15px; font-weight: 600; opacity: .95; }}
+    .meta-bar {{
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 10px; padding: 16px 32px; background: #fff; border-bottom: 1px solid #e0e4ed;
+    }}
+    .meta-cell {{ background: #f7f8fc; border-radius: 8px; padding: 10px 12px; }}
+    .meta-k {{ font-size: 10px; font-weight: 700; letter-spacing: .8px; text-transform: uppercase; color: #6b7280; }}
+    .meta-v {{ margin-top: 4px; font-size: 13px; font-weight: 600; word-break: break-word; }}
+    .attention {{ padding: 18px 32px 8px; background: #fff8f4; border-bottom: 1px solid #f0d9cc; }}
+    .attn-note {{ font-size: 13px; color: #5c3d2e; margin-bottom: 12px; }}
+    .attn-card {{
+      background: #fff; border-radius: 10px; padding: 12px 14px; margin-bottom: 10px;
+      border-left: 4px solid #dc3545; box-shadow: 0 1px 4px rgba(0,0,0,.06);
+    }}
+    .attn-card.error {{ border-left-color: #e67e22; }}
+    .attn-head {{ display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; }}
+    .attn-kind {{ font-size: 11px; font-weight: 800; letter-spacing: .6px; color: #9b1c1c; }}
+    .attn-extra {{ color: #6b7280; font-size: 12px; }}
+    .attn-hint {{ margin-top: 6px; font-size: 12px; color: #7c2d12; font-weight: 600; }}
+    .attn-msg {{
+      margin-top: 8px; white-space: pre-wrap; font-size: 12px;
+      font-family: "SFMono-Regular", Consolas, monospace; color: #7f1d1d;
+      background: #fff5f5; padding: 8px; border-radius: 6px; overflow-x: auto;
+    }}
+    .toolbar {{
+      display: flex; gap: 10px; flex-wrap: wrap; align-items: center;
+      padding: 14px 32px 0;
+    }}
+    .toolbar input {{
+      flex: 1; min-width: 220px; padding: 8px 12px; border: 1px solid #d5d9e3;
+      border-radius: 8px; font-size: 13px;
+    }}
+    .chip {{
+      border: 1px solid #d5d9e3; background: #fff; border-radius: 999px;
+      padding: 6px 12px; font-size: 12px; font-weight: 600; cursor: pointer;
+    }}
+    .chip.active {{ background: #3D0F6E; color: #fff; border-color: #3D0F6E; }}
     .summary-section {{
       background: linear-gradient(135deg, #fafbff 0%, #f4f6fb 100%);
       padding: 22px 32px;
@@ -256,7 +447,6 @@ html = f"""<!DOCTYPE html>
     .fail-num   {{ color: #dc3545; }}
     .error-num  {{ color: #e67e22; }}
     .skip-num   {{ color: #6c757d; }}
-    /* Tables */
     .table-wrap {{ padding: 24px 32px; }}
     h2 {{ font-size: 16px; font-weight: 600; margin-bottom: 14px; color: #1a1f3c; }}
     h2 .count {{ font-weight: 400; color: #888; }}
@@ -276,6 +466,7 @@ html = f"""<!DOCTYPE html>
     tr.error   {{ background: #fffbf0; }}
     tr.skipped {{ background: #f8f9fa; }}
     tr:hover   {{ background: #f0f4ff; cursor: default; }}
+    tr.hidden  {{ display: none; }}
     code {{
       font-size: 12px; background: #eef0f6; padding: 2px 5px;
       border-radius: 4px; font-family: "SFMono-Regular", Consolas, monospace;
@@ -304,16 +495,22 @@ html = f"""<!DOCTYPE html>
         </svg>
         dbt Build Report
       </h1>
+      {f'<div class="run-title">{esc(report_title)}</div>' if report_title else ''}
       <div style="margin-top:8px"><span class="badge">{overall_status}</span></div>
     </div>
     <div class="meta">
-      Generated: {generated_at}<br>
-      dbt schema: {dbt_version}<br>
+      Generated: {esc(generated_at)}<br>
+      dbt schema: {esc(dbt_version)}<br>
       Built: {m_total} | Tests: {t_total}
     </div>
   </header>
 
-  <!-- Models summary -->
+  <div class="meta-bar">
+    {meta_html}
+  </div>
+
+  {attention_html}
+
   <div class="summary-section">
     <div class="summary-label">Models / snapshots / seeds</div>
     <div class="summary">
@@ -336,7 +533,6 @@ html = f"""<!DOCTYPE html>
     </div>
   </div>
 
-  <!-- Tests summary -->
   <div class="summary-section">
     <div class="summary-label">Tests</div>
     <div class="summary">
@@ -352,6 +548,10 @@ html = f"""<!DOCTYPE html>
         <div class="num fail-num">{t_failed}</div>
         <div class="lbl">Failed</div>
       </div>
+      <div class="stat-card card-error">
+        <div class="num error-num">{t_errored}</div>
+        <div class="lbl">Errors</div>
+      </div>
       <div class="stat-card card-skipped">
         <div class="num skip-num">{t_skipped}</div>
         <div class="lbl">Skipped</div>
@@ -359,7 +559,14 @@ html = f"""<!DOCTYPE html>
     </div>
   </div>
 
-  <!-- Model Build Results -->
+  <div class="toolbar">
+    <input id="q" type="search" placeholder="Search models, tests, relations, messages…"/>
+    <button class="chip active" data-filter="all" type="button">All</button>
+    <button class="chip" data-filter="problems" type="button">Problems only</button>
+    <button class="chip" data-filter="fail" type="button">FAIL</button>
+    <button class="chip" data-filter="error" type="button">ERROR</button>
+  </div>
+
   <div class="table-wrap">
     <h2>Build Results <span class="count">{m_total}</span></h2>
     <table>
@@ -367,8 +574,11 @@ html = f"""<!DOCTYPE html>
         <tr>
           <th>Name</th>
           <th>Type</th>
-          <th>Schema</th>
+          <th>Layer</th>
+          <th>Materialized</th>
+          <th>Relation</th>
           <th>Status</th>
+          <th>Rows</th>
           <th>Time</th>
           <th>Message</th>
         </tr>
@@ -379,7 +589,6 @@ html = f"""<!DOCTYPE html>
     </table>
   </div>
 
-  <!-- Schema Test Results -->
   <div class="table-wrap">
     <h2>Schema Test Results <span class="count">{t_total}</span></h2>
     <table>
@@ -390,6 +599,7 @@ html = f"""<!DOCTYPE html>
           <th>Column</th>
           <th>Test Type</th>
           <th>Status</th>
+          <th>Failing rows</th>
           <th>Time</th>
           <th>Message</th>
         </tr>
@@ -403,12 +613,41 @@ html = f"""<!DOCTYPE html>
   <footer>
     Generated by dbt_report.py &mdash; dbt native build results
   </footer>
+  <script>
+    (function () {{
+      const q = document.getElementById('q');
+      const chips = document.querySelectorAll('.chip');
+      let filter = 'all';
+      function apply() {{
+        const term = (q.value || '').trim().toLowerCase();
+        document.querySelectorAll('tbody tr').forEach(function (tr) {{
+          const status = tr.getAttribute('data-status') || '';
+          const search = tr.getAttribute('data-search') || '';
+          let ok = true;
+          if (filter === 'problems') ok = (status === 'fail' || status === 'error');
+          else if (filter === 'fail') ok = status === 'fail';
+          else if (filter === 'error') ok = status === 'error';
+          if (term && search.indexOf(term) === -1) ok = false;
+          tr.classList.toggle('hidden', !ok);
+        }});
+      }}
+      q.addEventListener('input', apply);
+      chips.forEach(function (chip) {{
+        chip.addEventListener('click', function () {{
+          chips.forEach(function (c) {{ c.classList.remove('active'); }});
+          chip.classList.add('active');
+          filter = chip.getAttribute('data-filter');
+          apply();
+        }});
+      }});
+    }})();
+  </script>
 </body>
 </html>
 """
 
 # ── Write output ───────────────────────────────────────────────────────────────
-OUTPUT_PATH.write_text(html, encoding="utf-8")
+OUTPUT_PATH.write_text(html_out, encoding="utf-8")
 print(f"[OK] Report written to: {OUTPUT_PATH.resolve()}")
 print(f"     Built  - Total: {m_total} | Passed: {m_passed} | Errors: {m_errors} | Skipped: {m_skipped}")
-print(f"     Tests  - Total: {t_total} | Passed: {t_passed} | Failed: {t_failed} | Skipped: {t_skipped}")
+print(f"     Tests  - Total: {t_total} | Passed: {t_passed} | Failed: {t_failed} | Errors: {t_errored} | Skipped: {t_skipped}")

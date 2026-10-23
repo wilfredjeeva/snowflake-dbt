@@ -1,0 +1,198 @@
+# Manual selective (or full) dbt build -> DEV
+# Purpose  : Let developers run feature-branch models in Snowflake DEV from
+#             GitHub Actions so a dropped dbt/Snowflake VM session does not
+#             lose the run. Does not promote to TEST/PREPROD/PROD.
+# Trigger  : Manual only (workflow_dispatch).
+#
+# How to run
+#   1. Actions → manual-selective-deploy-to-dev → Run workflow
+#   2. "Use workflow from" = your feature branch (this file must exist on it;
+#      merge/rebase test into the feature branch once if the dropdown is empty)
+#   3. run_title = what you want shown in the Actions run list
+#   4. dbt_selector = model names or path:...sql (blank = entire project)
+#   5. dbt_exclude = optional hitchhiker tests / extra nodes
+#
+# Shared DEV: other developers' tables can change while you run. Do not use
+# this as a substitute for the TEST merge pipeline.
+
+name: manual-selective-deploy-to-dev
+run-name: "${{ inputs.run_title }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_title:
+        description: "Display name for this Actions run (shown in the run list)"
+        required: true
+        type: string
+      dbt_selector:
+        description: >
+          dbt --select. Leave blank to build the whole project.
+          Prefer exact names or .sql paths on one line, e.g.
+          path:models/gold/GLA/gold_GLA_FactCulturalInfrastructure.sql path:snapshots/gold/gla_snapshots/snp_gold_GLA_SnpCulturalInfrastructure.sql
+        required: false
+        default: ""
+        type: string
+      dbt_exclude:
+        description: >
+          Optional dbt --exclude (space-separated). Example:
+          test_FactCulturalInfrastructure_record_count
+        required: false
+        default: ""
+        type: string
+      reason:
+        description: "Why this DEV run (ticket / what you are testing)"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  selective_deploy_dev:
+    name: "DEV  [${{ inputs.run_title }}]"
+    runs-on: ubuntu-latest
+    # Must match the GitHub Environment name (screenshot: DEV).
+    environment: DEV
+    timeout-minutes: 360
+
+    steps:
+      - name: Log run parameters
+        run: |
+          echo "=================================================="
+          echo "  SELECTIVE DEV BUILD"
+          echo "  Title    : ${{ inputs.run_title }}"
+          echo "  Branch   : ${{ github.ref_name }}  (${{ github.sha }})"
+          echo "  Selector : ${{ inputs.dbt_selector }}"
+          echo "  Exclude  : ${{ inputs.dbt_exclude }}"
+          echo "  Reason   : ${{ inputs.reason }}"
+          echo "  Actor    : ${{ github.actor }}"
+          echo "=================================================="
+          echo "Pick your feature branch in 'Use workflow from' — that is the code that is built."
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip dependencies
+        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-dbt-${{ hashFiles('**/packages.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-dbt-
+
+      - name: Install dbt and Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install dbt-core==1.9.4 dbt-snowflake==1.9.2 pyyaml "snowflake-cli==3.13.1"
+
+      - name: Write Snowflake private key
+        run: |
+          printf '%s' "${{ secrets.SNOWFLAKE_PRIVATE_KEY }}" > $HOME/sf_key.p8
+          chmod 600 $HOME/sf_key.p8
+
+      - name: Validate governance metadata (tags, owner, classification)
+        run: python scripts/validate_metadata.py
+
+      - name: Install dbt packages
+        run: |
+          cd datahub_refinery
+          dbt deps --target dev
+
+      - name: Write CI profiles.yml (dev)
+        env:
+          SF_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SF_USER: ${{ secrets.SNOWFLAKE_USER }}
+          SF_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
+          SF_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+          SF_DB: ${{ secrets.SNOWFLAKE_DB }}
+          SF_SCHEMA: ${{ secrets.SNOWFLAKE_SCHEMA }}
+          SF_PASSPHRASE: ${{ secrets.SNOWFLAKE_KEY_PASSPHRASE }}
+        run: |
+          python3 - << 'PYEOF'
+          import os, pathlib, json
+          e = os.environ
+          content = f"""datahub_refinery:
+            target: dev
+            outputs:
+              dev:
+                type: snowflake
+                account: {json.dumps(e['SF_ACCOUNT'])}
+                user: {json.dumps(e['SF_USER'])}
+                role: {json.dumps(e['SF_ROLE'])}
+                warehouse: {json.dumps(e['SF_WAREHOUSE'])}
+                database: {json.dumps(e['SF_DB'])}
+                schema: {json.dumps(e['SF_SCHEMA'])}
+                private_key_path: "/home/runner/sf_key.p8"
+                private_key_passphrase: {json.dumps(e['SF_PASSPHRASE'])}
+                threads: 8
+                client_session_keep_alive: true
+                client_session_keep_alive_heartbeat_frequency: 900
+          """
+          pathlib.Path("datahub_refinery/profiles.yml").write_text(content)
+          print("CI profiles.yml written for dev.")
+          PYEOF
+
+      - name: "dbt build to DEV"
+        timeout-minutes: 340
+        working-directory: datahub_refinery
+        env:
+          DBT_SELECTOR: ${{ inputs.dbt_selector }}
+          DBT_EXCLUDE: ${{ inputs.dbt_exclude }}
+        run: |
+          set -euo pipefail
+          echo "Branch   : ${{ github.ref_name }}"
+          echo "Selector : ${DBT_SELECTOR:-<entire project>}"
+          echo "Exclude  : ${DBT_EXCLUDE:-<none>}"
+          extra=()
+          if [ -n "${DBT_SELECTOR}" ]; then
+            # Word-split so "path:a.sql path:b.sql" is two --select args.
+            extra+=(--select ${DBT_SELECTOR})
+          fi
+          if [ -n "${DBT_EXCLUDE}" ]; then
+            extra+=(--exclude ${DBT_EXCLUDE})
+          fi
+          dbt build \
+            --target dev \
+            --no-fail-fast \
+            --profiles-dir . \
+            "${extra[@]}"
+
+      - name: Generate dbt HTML report
+        if: always() && hashFiles('datahub_refinery/target/run_results.json') != ''
+        env:
+          DBT_REPORT_TITLE: ${{ inputs.run_title }}
+          DBT_REPORT_ENV: DEV
+          DBT_REPORT_BRANCH: ${{ github.ref_name }}
+          DBT_REPORT_SHA: ${{ github.sha }}
+          DBT_REPORT_ACTOR: ${{ github.actor }}
+          DBT_REPORT_SELECTOR: ${{ inputs.dbt_selector }}
+          DBT_REPORT_EXCLUDE: ${{ inputs.dbt_exclude }}
+          DBT_REPORT_REASON: ${{ inputs.reason }}
+        run: python scripts/dbt_report.py
+
+      - name: Upload dbt HTML report
+        if: always() && hashFiles('dbt_test_report.html') != ''
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
+        with:
+          name: "dbt_report_dev_${{ github.run_id }}"
+          path: dbt_test_report.html
+          if-no-files-found: warn
+
+      - name: Upload dbt JSON artifacts
+        if: always()
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
+        with:
+          name: "dbt_artifacts_dev_${{ github.run_id }}"
+          path: |
+            datahub_refinery/target/run_results.json
+            datahub_refinery/target/manifest.json
+          if-no-files-found: ignore
+          retention-days: 14

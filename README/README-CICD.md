@@ -174,11 +174,13 @@ DEV is a **shared** warehouse/database. Two developers running at once can colli
 
 ### Manual selective recovery
 
+All four manual selective workflows share: `run_title` (Actions run name), `dbt_selector`, optional `dbt_exclude`, and `reason`.
+
 | Workflow | Checkout | Use when |
 |---|---|---|
 | `manual-selective-deploy-to-dev` | Branch dropdown (**Use workflow from**) | Feature-branch models in Snowflake DEV |
 | `manual-selective-deploy-to-test` | Input `branch` (prefer `test`) | Targeted TEST rebuild |
-| `manual-selective-deploy-to-preprod` | Input `branch` + `run_title` + optional `dbt_exclude` | Targeted PREPROD rebuild |
+| `manual-selective-deploy-to-preprod` | Input `branch` | Targeted PREPROD rebuild |
 | `manual-selective-deploy-to-prod` | **Always `main`** | Rebuild models already on `main` after a missed selective PROD run |
 
 Example PROD selector (one line, specific files — avoid directory wildcards unless intentional):

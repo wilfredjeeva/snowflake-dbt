@@ -5,12 +5,19 @@
 # Trigger  : Manual only (workflow_dispatch).
 #
 # How to run
-#   1. Actions → manual-selective-deploy-to-dev → Run workflow
-#   2. "Use workflow from" = your feature branch (this file must exist on it;
-#      merge/rebase test into the feature branch once if the dropdown is empty)
-#   3. run_title = what you want shown in the Actions run list
-#   4. dbt_selector = model names or path:...sql (blank = entire project)
-#   5. dbt_exclude = optional hitchhiker tests / extra nodes
+#   1. This YAML must already be committed on the FEATURE branch you will
+#      select. "Workflow dispatch unavailable" means it is not on that branch
+#      yet — merge/rebase test (after this file is on test) into the feature
+#      branch, or commit this file onto the feature branch, then retry.
+#   2. Actions → manual-selective-deploy-to-dev → Run workflow
+#   3. "Use workflow from" = your feature branch (never test / main)
+#   4. run_title = what you want shown in the Actions run list
+#   5. dbt_selector = model names or path:...sql (blank = entire project)
+#   6. dbt_exclude = optional hitchhiker tests / extra nodes
+#
+# GitHub cannot hide test/main from the "Use workflow from" list if this file
+# exists on those branches. The job fails if they are selected. Also set the
+# DEV GitHub Environment → Deployment branches → Selected branches → feature/*
 #
 # Shared DEV: other developers' tables can change while you run. Do not use
 # this as a substitute for the TEST merge pipeline.
@@ -22,26 +29,21 @@ on:
   workflow_dispatch:
     inputs:
       run_title:
-        description: "Display name for this Actions run (shown in the run list)"
+        description: "Name shown in the Actions run list"
         required: true
         type: string
       dbt_selector:
-        description: >
-          dbt --select. Leave blank to build the whole project.
-          Prefer exact names or .sql paths on one line, e.g.
-          path:models/gold/GLA/gold_GLA_FactCulturalInfrastructure.sql path:snapshots/gold/gla_snapshots/snp_gold_GLA_SnpCulturalInfrastructure.sql
+        description: "dbt --select. Blank = entire project. Names or path:...sql, space-separated. Example: my_model path:models/gold/my_model.sql"
         required: false
         default: ""
         type: string
       dbt_exclude:
-        description: >
-          Optional dbt --exclude (space-separated). Example:
-          test_FactCulturalInfrastructure_record_count
+        description: "Optional dbt --exclude. Names or path:...sql, space-separated. Example: test_my_model_record_count"
         required: false
         default: ""
         type: string
       reason:
-        description: "Why this DEV run (ticket / what you are testing)"
+        description: "Why this run (ticket / audit)"
         required: false
         default: ""
         type: string
@@ -57,8 +59,30 @@ jobs:
     # Must match the GitHub Environment name (screenshot: DEV).
     environment: DEV
     timeout-minutes: 360
+    # Block test / main / promote even if someone picks them in the dropdown.
+    # Pair this with DEV environment "Deployment branches" = feature/*
+    if: |
+      github.ref != 'refs/heads/main' &&
+      github.ref != 'refs/heads/test' &&
+      !startsWith(github.ref, 'refs/heads/promote-')
 
     steps:
+      - name: Require a feature branch
+        run: |
+          set -euo pipefail
+          branch="${GITHUB_REF_NAME}"
+          echo "Requested branch: ${branch}"
+          case "${branch}" in
+            test|main)
+              echo "::error::DEV builds are not allowed from '${branch}'. Select your feature branch in 'Use workflow from'."
+              exit 1
+              ;;
+            promote-*)
+              echo "::error::DEV builds are not allowed from promote branches. Select your feature branch."
+              exit 1
+              ;;
+          esac
+
       - name: Log run parameters
         run: |
           echo "=================================================="

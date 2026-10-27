@@ -17,29 +17,25 @@ on:
   workflow_dispatch:
     inputs:
       run_title:
-        description: "Display name for this Actions run (shown in the run list)"
+        description: "Name shown in the Actions run list"
         required: true
         type: string
       branch:
-        description: "Branch to deploy from (e.g. test, feature/my-branch)"
+        description: "Git branch to checkout and build"
         required: true
         default: "test"
         type: string
       dbt_selector:
-        description: >
-          dbt --select. Prefer exact names or .sql paths on one line, e.g.
-          path:models/silver/LondonDatastore_GLA/silver_LondonDatastore_GLA_CulturalInfrastructure.sql
+        description: "dbt --select. Names or path:...sql, space-separated. Example: my_model path:models/gold/my_model.sql"
         required: true
         type: string
       dbt_exclude:
-        description: >
-          Optional dbt --exclude (space-separated paths or test names). Example:
-          path:tests/gold/GLA/test_GLA_FactCulturalInfrastructure_record_count.sql
+        description: "Optional dbt --exclude. Names or path:...sql, space-separated. Example: test_my_model_record_count"
         required: false
         default: ""
         type: string
       reason:
-        description: "Reason for this targeted deploy (for audit trail)"
+        description: "Why this run (ticket / audit)"
         required: false
         default: ""
         type: string

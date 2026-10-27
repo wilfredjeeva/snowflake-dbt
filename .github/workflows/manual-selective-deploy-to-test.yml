@@ -7,25 +7,34 @@
 # Selector : Any valid dbt --select expression.
 
 name: manual-selective-deploy-to-test
+run-name: "${{ inputs.run_title }}"
 
 on:
   workflow_dispatch:
     inputs:
+      run_title:
+        description: "Name shown in the Actions run list"
+        required: true
+        type: string
       branch:
-        description: "Git ref to checkout (prefer test; feature/* only for TEST experiments)"
+        description: "Git branch to checkout and build"
         required: true
         default: "test"
+        type: string
       dbt_selector:
-        description: >
-          dbt --select expression. Examples:
-          'gold_elections_DimElectionCandidates' |
-          'path:models/gold/elections/' |
-          'path:models/bronze_adf/DWHMetadata/bronze_DWHMetadata_OutputTables.sql path:models/silver/DWHMetadata/silver_DWHMetadata_OutputTables.sql'
+        description: "dbt --select. Names or path:...sql, space-separated. Example: my_model path:models/gold/my_model.sql"
         required: true
-      reason:
-        description: "Reason for this targeted deploy (audit)"
+        type: string
+      dbt_exclude:
+        description: "Optional dbt --exclude. Names or path:...sql, space-separated. Example: test_my_model_record_count"
         required: false
         default: ""
+        type: string
+      reason:
+        description: "Why this run (ticket / audit)"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -33,7 +42,7 @@ permissions:
 
 jobs:
   selective_deploy_test:
-    name: "Selective TEST  [${{ inputs.dbt_selector }}]"
+    name: "TEST  [${{ inputs.run_title }}]"
     runs-on: ubuntu-latest
     environment: test
     timeout-minutes: 360
@@ -43,8 +52,10 @@ jobs:
         run: |
           echo "=================================================="
           echo "  SELECTIVE TEST DEPLOY"
+          echo "  Title    : ${{ inputs.run_title }}"
           echo "  Branch   : ${{ inputs.branch }}"
           echo "  Selector : ${{ inputs.dbt_selector }}"
+          echo "  Exclude  : ${{ inputs.dbt_exclude }}"
           echo "  Reason   : ${{ inputs.reason }}"
           echo "  Actor    : ${{ github.actor }}"
           echo "=================================================="
@@ -121,18 +132,34 @@ jobs:
       - name: "dbt build (selective) to TEST"
         timeout-minutes: 340
         working-directory: datahub_refinery
+        env:
+          DBT_SELECTOR: ${{ inputs.dbt_selector }}
+          DBT_EXCLUDE: ${{ inputs.dbt_exclude }}
         run: |
-          echo "Selector: ${{ inputs.dbt_selector }}"
-          # dbt orders by DAG (bronze → silver → gold → snapshot/tests).
-          # No --exclude: selector is explicit; excluded models are never selected.
+          set -euo pipefail
+          echo "Selector: ${DBT_SELECTOR}"
+          echo "Exclude : ${DBT_EXCLUDE:-<none>}"
+          extra=(--select ${DBT_SELECTOR})
+          if [ -n "${DBT_EXCLUDE}" ]; then
+            extra+=(--exclude ${DBT_EXCLUDE})
+          fi
           dbt build \
-            --select "${{ inputs.dbt_selector }}" \
             --target test \
             --no-fail-fast \
-            --profiles-dir .
+            --profiles-dir . \
+            "${extra[@]}"
 
       - name: Generate dbt test HTML report
         if: always() && hashFiles('datahub_refinery/target/run_results.json') != ''
+        env:
+          DBT_REPORT_TITLE: ${{ inputs.run_title }}
+          DBT_REPORT_ENV: TEST
+          DBT_REPORT_BRANCH: ${{ inputs.branch }}
+          DBT_REPORT_SHA: ${{ github.sha }}
+          DBT_REPORT_ACTOR: ${{ github.actor }}
+          DBT_REPORT_SELECTOR: ${{ inputs.dbt_selector }}
+          DBT_REPORT_EXCLUDE: ${{ inputs.dbt_exclude }}
+          DBT_REPORT_REASON: ${{ inputs.reason }}
         run: python scripts/dbt_report.py
 
       - name: Upload dbt test report

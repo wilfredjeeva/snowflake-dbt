@@ -9,24 +9,28 @@
 # Pick models with dbt_selector (names or path:...).
 
 name: manual-selective-deploy-to-prod
+run-name: "${{ inputs.run_title }}"
 
 on:
   workflow_dispatch:
     inputs:
-      dbt_selector:
-        description: >
-          dbt --select from current main. Prefer exact model/snapshot names or .sql paths.
-          Avoid folder paths like path:models/gold/elections/.
+      run_title:
+        description: "Name shown in the Actions run list"
         required: true
+        type: string
+      dbt_selector:
+        description: "dbt --select from main. Names or path:...sql, space-separated. Example: my_model path:models/gold/my_model.sql"
+        required: true
+        type: string
       dbt_exclude:
-        description: >
-          Optional dbt --exclude. To skip DimElectionParties tests:
-          test_dimelectionparties_data_validation test_dimelectionparties_record_count
+        description: "Optional dbt --exclude. Names or path:...sql, space-separated. Example: test_my_model_record_count"
         required: false
         default: ""
+        type: string
       reason:
-        description: "Reason for this targeted PROD deploy (required for audit)"
+        description: "Why this PROD run (required for audit)"
         required: true
+        type: string
 
 permissions:
   contents: read
@@ -34,7 +38,7 @@ permissions:
 
 jobs:
   selective_deploy_prod:
-    name: "Selective PROD  [${{ inputs.dbt_selector }}]"
+    name: "PROD  [${{ inputs.run_title }}]"
     runs-on: ubuntu-latest
     environment: prod
     timeout-minutes: 360
@@ -46,6 +50,7 @@ jobs:
         run: |
           echo "=================================================="
           echo "  SELECTIVE PROD DEPLOY (main only)"
+          echo "  Title    : ${{ inputs.run_title }}"
           echo "  Ref      : main (forced checkout)"
           echo "  Selector : ${{ inputs.dbt_selector }}"
           echo "  Exclude  : ${{ inputs.dbt_exclude }}"
@@ -125,29 +130,34 @@ jobs:
       - name: "dbt build (selective) to PROD"
         timeout-minutes: 340
         working-directory: datahub_refinery
+        env:
+          DBT_SELECTOR: ${{ inputs.dbt_selector }}
+          DBT_EXCLUDE: ${{ inputs.dbt_exclude }}
         run: |
           set -euo pipefail
-          echo "Selector: ${{ inputs.dbt_selector }}"
-          echo "Exclude : ${{ inputs.dbt_exclude }}"
-          # dbt orders by DAG. Parties singular tests can still enter the graph
-          # when they share refs/tags with Candidates — use dbt_exclude to skip them.
-          if [ -n "${{ inputs.dbt_exclude }}" ]; then
-            dbt build \
-              --select ${{ inputs.dbt_selector }} \
-              --exclude ${{ inputs.dbt_exclude }} \
-              --target prod \
-              --no-fail-fast \
-              --profiles-dir .
-          else
-            dbt build \
-              --select ${{ inputs.dbt_selector }} \
-              --target prod \
-              --no-fail-fast \
-              --profiles-dir .
+          echo "Selector: ${DBT_SELECTOR}"
+          echo "Exclude : ${DBT_EXCLUDE:-<none>}"
+          extra=(--select ${DBT_SELECTOR})
+          if [ -n "${DBT_EXCLUDE}" ]; then
+            extra+=(--exclude ${DBT_EXCLUDE})
           fi
+          dbt build \
+            --target prod \
+            --no-fail-fast \
+            --profiles-dir . \
+            "${extra[@]}"
 
       - name: Generate dbt test HTML report
         if: always() && hashFiles('datahub_refinery/target/run_results.json') != ''
+        env:
+          DBT_REPORT_TITLE: ${{ inputs.run_title }}
+          DBT_REPORT_ENV: PROD
+          DBT_REPORT_BRANCH: main
+          DBT_REPORT_SHA: ${{ github.sha }}
+          DBT_REPORT_ACTOR: ${{ github.actor }}
+          DBT_REPORT_SELECTOR: ${{ inputs.dbt_selector }}
+          DBT_REPORT_EXCLUDE: ${{ inputs.dbt_exclude }}
+          DBT_REPORT_REASON: ${{ inputs.reason }}
         run: python scripts/dbt_report.py
 
       - name: Upload dbt test report

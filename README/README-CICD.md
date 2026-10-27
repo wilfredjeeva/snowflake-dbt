@@ -153,11 +153,20 @@ Use **`manual-selective-deploy-to-dev`** when a developer would otherwise run mo
 
 | Input | Purpose |
 |---|---|
-| **Use workflow from** (branch dropdown) | The feature branch that is checked out and built. This workflow file must exist on that branch — merge/rebase `test` into the feature branch once after this YAML lands. |
+| **Use workflow from** (branch dropdown) | The **feature branch** that is checked out and built. This YAML must already exist on that branch. GitHub cannot hide `test` / `main` from the list; the job fails if they are selected. |
 | `run_title` | Becomes the Actions **run name** in the list (and the job label). |
 | `dbt_selector` | `dbt --select`. Blank = entire project. Prefer exact model/snapshot names or `.sql` paths. Do not list YAML / singular test files. |
 | `dbt_exclude` | Optional `dbt --exclude` (hitchhiker tests). |
 | `reason` | Audit note (ticket / what you are testing). |
+
+**“Workflow dispatch unavailable”** — you picked a feature branch that does not contain `manual-selective-deploy-to-dev.yml`. Copying the file into a VM is not enough; it must be **committed and pushed on that feature branch**. After the file is on `test`, merge/rebase `test` into the feature branch, then select the feature branch again.
+
+**Restrict `test` and `main` on the DEV environment** (GitHub UI, not YAML):
+
+1. Repo → **Settings** → **Environments** → **DEV**
+2. **Deployment branches and tags** → **Selected branches**
+3. Add rule `feature/*` (add `bugfix/*` too if you use that prefix)
+4. Save. Do **not** leave this as “No restriction”.
 
 This job **does not** run `snow dbt deploy` (that would overwrite a shared DEV dbt project object from unfinished feature branches). It only `dbt build`s into Snowflake DEV.
 
@@ -169,7 +178,7 @@ DEV is a **shared** warehouse/database. Two developers running at once can colli
 |---|---|---|
 | `manual-selective-deploy-to-dev` | Branch dropdown (**Use workflow from**) | Feature-branch models in Snowflake DEV |
 | `manual-selective-deploy-to-test` | Input `branch` (prefer `test`) | Targeted TEST rebuild |
-| `manual-selective-deploy-to-preprod` | Input `branch` | Targeted PREPROD rebuild |
+| `manual-selective-deploy-to-preprod` | Input `branch` + `run_title` + optional `dbt_exclude` | Targeted PREPROD rebuild |
 | `manual-selective-deploy-to-prod` | **Always `main`** | Rebuild models already on `main` after a missed selective PROD run |
 
 Example PROD selector (one line, specific files — avoid directory wildcards unless intentional):
@@ -266,6 +275,8 @@ Where `<ENV>` is `DEV`, `TEST`, `PREPROD`, or `PROD`.
 
 The DEV workflow uses `environment: DEV` to match the GitHub Environment name. If secrets are not found, the environment name in the YAML must match Settings → Environments exactly.
 
+DEV **Deployment branches** must be **Selected branches** → `feature/*` so `test` and `main` cannot deploy to DEV. GitHub’s **Use workflow from** dropdown still lists every branch that has the workflow file; the environment rule plus the job `if` reject `test` / `main` / `promote-*`.
+
 ### Secrets (per environment)
 
 | Secret | Description |
@@ -325,6 +336,11 @@ Every deploy workflow runs `scripts/validate_metadata.py` before dbt build. Ever
 
 **Cause:** Upstream landing table not deployed (`PROD_LANDING_ADF...`).  
 **Fix:** Deploy ADF/landing first, then re-run PROD. Not a selector bug.
+
+### DEV: “Workflow dispatch unavailable”
+
+**Cause:** **Use workflow from** is a feature branch that does not have `manual-selective-deploy-to-dev.yml` (paste into a VM / only committing on `test` is not enough).  
+**Fix:** Commit and push this workflow onto that feature branch, or merge/rebase `test` (after the YAML is on `test`) into the feature branch. Then select the **feature** branch again — not `test` or `main`.
 
 ### DEV workflow is missing from the branch dropdown
 

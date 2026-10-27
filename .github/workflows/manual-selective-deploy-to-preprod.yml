@@ -11,24 +11,38 @@
 #               tag:my_tag               - all models with a specific tag
 
 name: manual-selective-deploy-to-preprod
+run-name: "${{ inputs.run_title }}"
 
 on:
   workflow_dispatch:
     inputs:
+      run_title:
+        description: "Display name for this Actions run (shown in the run list)"
+        required: true
+        type: string
       branch:
         description: "Branch to deploy from (e.g. test, feature/my-branch)"
         required: true
         default: "test"
+        type: string
       dbt_selector:
         description: >
-          dbt --select expression. Examples:
-          'path:models/silver/' | 'path:models/bronze/airbnb/' |
-          'model_name_A model_name_B' | 'tag:my_tag'
+          dbt --select. Prefer exact names or .sql paths on one line, e.g.
+          path:models/silver/LondonDatastore_GLA/silver_LondonDatastore_GLA_CulturalInfrastructure.sql
         required: true
+        type: string
+      dbt_exclude:
+        description: >
+          Optional dbt --exclude (space-separated paths or test names). Example:
+          path:tests/gold/GLA/test_GLA_FactCulturalInfrastructure_record_count.sql
+        required: false
+        default: ""
+        type: string
       reason:
         description: "Reason for this targeted deploy (for audit trail)"
         required: false
         default: ""
+        type: string
 
 permissions:
   id-token: write
@@ -37,7 +51,7 @@ permissions:
 
 jobs:
   selective_deploy_preprod:
-    name: "Selective deploy to PREPROD  [${{ inputs.dbt_selector }}]"
+    name: "PREPROD  [${{ inputs.run_title }}]"
     runs-on: ubuntu-latest
     environment: preprod
     timeout-minutes: 360
@@ -47,8 +61,10 @@ jobs:
         run: |
           echo "=================================================="
           echo "  SELECTIVE PREPROD DEPLOY"
+          echo "  Title    : ${{ inputs.run_title }}"
           echo "  Branch   : ${{ inputs.branch }}"
           echo "  Selector : ${{ inputs.dbt_selector }}"
+          echo "  Exclude  : ${{ inputs.dbt_exclude }}"
           echo "  Reason   : ${{ inputs.reason }}"
           echo "  Run ID   : ${{ github.run_id }}"
           echo "  Triggered: ${{ github.actor }} @ $(date -u)"
@@ -130,24 +146,40 @@ jobs:
       # Permanent excludes:
       #   1. platinum_ai_mosaic_poc_temp_* models - fail column masking policy governance
       #   2. silver_Ezytreev_ordworks,test_name:expression_is_true - pending upstream data fix
-      - name: "dbt build (selective) to PREPROD  [${{ inputs.dbt_selector }}]"
+      - name: "dbt build (selective) to PREPROD"
         timeout-minutes: 340
         working-directory: datahub_refinery
+        env:
+          DBT_SELECTOR: ${{ inputs.dbt_selector }}
+          DBT_EXCLUDE: ${{ inputs.dbt_exclude }}
         run: |
+          set -euo pipefail
           echo "Starting targeted PREPROD build - $(date -u)"
           echo "Branch   : ${{ inputs.branch }}"
-          echo "Selector : ${{ inputs.dbt_selector }}"
-          # dbt orders by DAG (bronze → silver → gold → snapshot/tests).
-          # No --exclude: selector is explicit; excluded models are never selected.
+          echo "Selector : ${DBT_SELECTOR}"
+          echo "Exclude  : ${DBT_EXCLUDE:-<none>}"
+          extra=(--select ${DBT_SELECTOR})
+          if [ -n "${DBT_EXCLUDE}" ]; then
+            extra+=(--exclude ${DBT_EXCLUDE})
+          fi
           dbt build \
-            --select "${{ inputs.dbt_selector }}" \
             --target preprod \
             --no-fail-fast \
-            --profiles-dir .
+            --profiles-dir . \
+            "${extra[@]}"
           echo "dbt build complete - $(date -u)"
 
       - name: Generate dbt test HTML report
         if: always()
+        env:
+          DBT_REPORT_TITLE: ${{ inputs.run_title }}
+          DBT_REPORT_ENV: PREPROD
+          DBT_REPORT_BRANCH: ${{ inputs.branch }}
+          DBT_REPORT_SHA: ${{ github.sha }}
+          DBT_REPORT_ACTOR: ${{ github.actor }}
+          DBT_REPORT_SELECTOR: ${{ inputs.dbt_selector }}
+          DBT_REPORT_EXCLUDE: ${{ inputs.dbt_exclude }}
+          DBT_REPORT_REASON: ${{ inputs.reason }}
         run: python scripts/dbt_report.py
 
       - name: Upload dbt test report

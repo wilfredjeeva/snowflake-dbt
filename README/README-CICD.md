@@ -39,6 +39,7 @@ feature/*  ──PR──►  test  ──[promote] PR──►  main
 | `manual-selective-deploy-to-test.yml` | Targeted `dbt build --select` → TEST | `workflow_dispatch` only |
 | `manual-selective-deploy-to-preprod.yml` | Targeted `dbt build --select` → PREPROD | `workflow_dispatch` only |
 | `manual-selective-deploy-to-prod.yml` | Targeted `dbt build --select` → PROD (**always checks out `main`**) | `workflow_dispatch` from `main` only |
+| `manual-selective-test.yml` | Targeted **`dbt test` only** (no model rebuild, no `snow dbt deploy`) → TEST / PREPROD / PROD | `workflow_dispatch` only |
 | `manual-full-build-deploy-to-test.yml` | Full build of `test` → TEST | `workflow_dispatch` only |
 | `manual-full-build-deploy-to-preprod.yml` | Full build of `test` → PREPROD | `workflow_dispatch` only |
 | `manual-full-build-deploy-to-prod.yml` | Full build of `main` → PROD | `workflow_dispatch` only |
@@ -172,9 +173,30 @@ This job **does not** run `snow dbt deploy` (that would overwrite a shared DEV d
 
 DEV is a **shared** warehouse/database. Two developers running at once can collide. This is not a replacement for merging to `test`.
 
+### Manual selective tests only (QA evidence)
+
+Use **`manual-selective-test`** when QA/DEs need to **re-run tests** on tables that are already built — no model rebuild, no `snow dbt deploy`.
+
+| Input | Purpose |
+|---|---|
+| `run_title` | Actions run name (evidence label). |
+| `target_env` | `test` / `preprod` / `prod` (uses that GitHub Environment + secrets). |
+| `branch` | Code to parse tests from. Prefer `test`. For **prod**, must be `main` (and **Use workflow from** = `main`). |
+| `dbt_selector` | `dbt test --select`. Use **model names** for `_tst_*.yml` schema tests (not the yml filename). Use `source:*` / `source:my_source` for source tests. |
+| `dbt_exclude` | Optional. |
+| `reason` | Ticket / Iteration evidence note. |
+
+HTML report + `run_results.json` / `manifest.json` are uploaded with **90-day** retention for evidence packs.
+
+Example — Hari’s bronze schema tests (tests only):
+
+```text
+bronze_APSDE_ORD_BOUNDARYLINE_COUNTRY bronze_APSDE_ORD_BoundaryLine_DistrictBoroughUnitary bronze_APSDE_ORD_BoundaryLine_DistrictBoroughUnitaryWard bronze_APSDE_TRN_BusShelters bronze_APSDEWCC_CRP_PARKING_ZONES bronze_CIPHR_Title bronze_EV_PodPoint_Westminster_Units_Usage_Data bronze_EveryoneActive_AttendanceExtract bronze_iCasework_Review_Stage bronze_Mosaic_care_packages bronze_Mosaic_element_occurrences bronze_Mosaic_elements bronze_Mosaic_mo_person_relationships bronze_Mosaic_package_service_details bronze_Mosaic_person_health_intervention_SDQ bronze_Mosaic_person_immunisations bronze_Mosaic_service_suspensions bronze_TFL_BikePoint_BikePointLocations
+```
+
 ### Manual selective recovery
 
-All four manual selective workflows share: `run_title` (Actions run name), `dbt_selector`, optional `dbt_exclude`, and `reason`.
+All manual selective **deploy** workflows share: `run_title` (Actions run name), `dbt_selector`, optional `dbt_exclude`, and `reason`.
 
 | Workflow | Checkout | Use when |
 |---|---|---|
@@ -182,6 +204,7 @@ All four manual selective workflows share: `run_title` (Actions run name), `dbt_
 | `manual-selective-deploy-to-test` | Input `branch` (prefer `test`) | Targeted TEST rebuild |
 | `manual-selective-deploy-to-preprod` | Input `branch` | Targeted PREPROD rebuild |
 | `manual-selective-deploy-to-prod` | **Always `main`** | Rebuild models already on `main` after a missed selective PROD run |
+| `manual-selective-test` | Input `branch` (+ env choice) | QA / evidence — **tests only** |
 
 Example PROD selector (one line, specific files — avoid directory wildcards unless intentional):
 

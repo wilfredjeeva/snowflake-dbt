@@ -1,0 +1,217 @@
+# Manual selective TESTS ONLY -> TEST / PREPROD / PROD
+# Purpose  : Run dbt tests without rebuilding models. For QA evidence on
+#             already-deployed Iteration items (schema tests, singular tests,
+#             source tests). Does NOT run dbt build and does NOT snow dbt deploy.
+# Trigger  : Manual only (workflow_dispatch).
+#
+# How to select
+#   - Schema tests in _tst_*.yml  → use the MODEL name (not the yml filename)
+#   - Source tests in _src_*.yml  → source:my_source or source:*
+#   - Singular tests              → test name or path:tests/.../foo.sql
+#
+# Example (Hari bronze schema tests):
+#   bronze_APSDE_ORD_BOUNDARYLINE_COUNTRY bronze_Mosaic_elements ...
+
+name: manual-selective-test
+run-name: "${{ inputs.run_title }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_title:
+        description: "Name shown in the Actions run list"
+        required: true
+        type: string
+      target_env:
+        description: "Snowflake environment to test against"
+        required: true
+        type: choice
+        options:
+          - test
+          - preprod
+          - prod
+        default: preprod
+      branch:
+        description: "Git branch with the dbt project (use main for prod)"
+        required: true
+        default: "test"
+        type: string
+      dbt_selector:
+        description: "dbt --select. Model names, source:*, or path:tests/... Example: my_model source:landing_foo"
+        required: true
+        type: string
+      dbt_exclude:
+        description: "Optional dbt --exclude. Example: test_my_model_record_count"
+        required: false
+        default: ""
+        type: string
+      reason:
+        description: "Why this run (ticket / QA evidence)"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  selective_test:
+    name: "TEST-ONLY ${{ inputs.target_env }}  [${{ inputs.run_title }}]"
+    runs-on: ubuntu-latest
+    # GitHub Environment names: test / preprod / prod (approval gates apply).
+    environment: ${{ inputs.target_env }}
+    timeout-minutes: 360
+
+    steps:
+      - name: Guard prod branch
+        if: inputs.target_env == 'prod'
+        run: |
+          set -euo pipefail
+          if [ "${{ inputs.branch }}" != "main" ] || [ "${{ github.ref }}" != "refs/heads/main" ]; then
+            echo "::error::PROD tests require Use workflow from = main and branch = main."
+            exit 1
+          fi
+
+      - name: Log run parameters
+        run: |
+          echo "=================================================="
+          echo "  SELECTIVE dbt TEST ONLY (no model rebuild)"
+          echo "  Title    : ${{ inputs.run_title }}"
+          echo "  Env      : ${{ inputs.target_env }}"
+          echo "  Branch   : ${{ inputs.branch }}"
+          echo "  Selector : ${{ inputs.dbt_selector }}"
+          echo "  Exclude  : ${{ inputs.dbt_exclude }}"
+          echo "  Reason   : ${{ inputs.reason }}"
+          echo "  Actor    : ${{ github.actor }}"
+          echo "=================================================="
+          echo "This job runs: dbt test  (not dbt build, not snow dbt deploy)"
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.branch }}
+          fetch-depth: 0
+
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip dependencies
+        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-dbt-${{ hashFiles('**/packages.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-dbt-
+
+      - name: Install dbt and Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # No snowflake-cli — this workflow never snow dbt deploys.
+          pip install dbt-core==1.9.4 dbt-snowflake==1.9.2 pyyaml
+
+      - name: Write Snowflake private key
+        run: |
+          printf '%s' "${{ secrets.SNOWFLAKE_PRIVATE_KEY }}" > $HOME/sf_key.p8
+          chmod 600 $HOME/sf_key.p8
+
+      - name: Validate governance metadata (tags, owner, classification)
+        run: python scripts/validate_metadata.py
+
+      - name: Install dbt packages
+        run: |
+          cd datahub_refinery
+          dbt deps --target "${{ inputs.target_env }}"
+
+      - name: Write CI profiles.yml
+        env:
+          SF_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SF_USER: ${{ secrets.SNOWFLAKE_USER }}
+          SF_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
+          SF_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+          SF_DB: ${{ secrets.SNOWFLAKE_DB }}
+          SF_SCHEMA: ${{ secrets.SNOWFLAKE_SCHEMA }}
+          SF_PASSPHRASE: ${{ secrets.SNOWFLAKE_KEY_PASSPHRASE }}
+          SF_TARGET: ${{ inputs.target_env }}
+        run: |
+          python3 - << 'PYEOF'
+          import os, pathlib, json
+          e = os.environ
+          target = e["SF_TARGET"]
+          content = f"""datahub_refinery:
+            target: {target}
+            outputs:
+              {target}:
+                type: snowflake
+                account: {json.dumps(e['SF_ACCOUNT'])}
+                user: {json.dumps(e['SF_USER'])}
+                role: {json.dumps(e['SF_ROLE'])}
+                warehouse: {json.dumps(e['SF_WAREHOUSE'])}
+                database: {json.dumps(e['SF_DB'])}
+                schema: {json.dumps(e['SF_SCHEMA'])}
+                private_key_path: "/home/runner/sf_key.p8"
+                private_key_passphrase: {json.dumps(e['SF_PASSPHRASE'])}
+                threads: 8
+                client_session_keep_alive: true
+                client_session_keep_alive_heartbeat_frequency: 900
+          """
+          pathlib.Path("datahub_refinery/profiles.yml").write_text(content)
+          print(f"CI profiles.yml written for {target}.")
+          PYEOF
+
+      - name: "dbt test (selective) — no model rebuild"
+        timeout-minutes: 340
+        working-directory: datahub_refinery
+        env:
+          DBT_SELECTOR: ${{ inputs.dbt_selector }}
+          DBT_EXCLUDE: ${{ inputs.dbt_exclude }}
+          SF_TARGET: ${{ inputs.target_env }}
+        run: |
+          set -euo pipefail
+          echo "Starting dbt test - $(date -u)"
+          echo "Env      : ${SF_TARGET}"
+          echo "Selector : ${DBT_SELECTOR}"
+          echo "Exclude  : ${DBT_EXCLUDE:-<none>}"
+          extra=(--select ${DBT_SELECTOR})
+          if [ -n "${DBT_EXCLUDE}" ]; then
+            extra+=(--exclude ${DBT_EXCLUDE})
+          fi
+          dbt test \
+            --target "${SF_TARGET}" \
+            --no-fail-fast \
+            --profiles-dir . \
+            "${extra[@]}"
+          echo "dbt test complete - $(date -u)"
+
+      - name: Generate dbt HTML report
+        if: always() && hashFiles('datahub_refinery/target/run_results.json') != ''
+        env:
+          DBT_REPORT_TITLE: ${{ inputs.run_title }}
+          DBT_REPORT_ENV: ${{ inputs.target_env }}
+          DBT_REPORT_BRANCH: ${{ inputs.branch }}
+          DBT_REPORT_SHA: ${{ github.sha }}
+          DBT_REPORT_ACTOR: ${{ github.actor }}
+          DBT_REPORT_SELECTOR: ${{ inputs.dbt_selector }}
+          DBT_REPORT_EXCLUDE: ${{ inputs.dbt_exclude }}
+          DBT_REPORT_REASON: ${{ inputs.reason }}
+        run: python scripts/dbt_report.py
+
+      - name: Upload dbt HTML report (QA evidence)
+        if: always() && hashFiles('dbt_test_report.html') != ''
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
+        with:
+          name: "dbt_report_test_only_${{ inputs.target_env }}_${{ github.run_id }}"
+          path: dbt_test_report.html
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Upload dbt JSON artifacts (QA evidence)
+        if: always()
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
+        with:
+          name: "dbt_artifacts_test_only_${{ inputs.target_env }}_${{ github.run_id }}"
+          path: |
+            datahub_refinery/target/run_results.json
+            datahub_refinery/target/manifest.json
+          if-no-files-found: ignore
+          retention-days: 90

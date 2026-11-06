@@ -1,8 +1,5 @@
-# Run a custom Python script against Snowflake using Environment secrets.
-# Purpose  : On-demand (manual) runner for team automation scripts.
-#             Each person commits their script under scripts/python_jobs/… and
-#             points script_path at it when they click Run workflow.
-# Trigger  : workflow_dispatch only (cron later).
+# On-demand Python → Snowflake (Environment secrets).
+# POC default: DimFuelTypes SELECT + Cortex reachability; uploads CSV + HTML.
 
 name: poc-python-snowflake
 run-name: "Python → ${{ inputs.target_env }}  [${{ inputs.run_title }}]"
@@ -14,7 +11,7 @@ on:
         description: "Name shown in the Actions run list (your job / ticket)"
         required: true
         type: string
-        default: "Snowflake Python job"
+        default: "SF CI smoke test POC"
       target_env:
         description: "GitHub Environment (which Snowflake secrets to use)"
         required: true
@@ -29,7 +26,7 @@ on:
         description: "Repo path to YOUR script (must already be on this branch)"
         required: true
         type: string
-        default: "scripts/poc_snowflake_connect.py"
+        default: "scripts/python_jobs/poc/sf_ci_smoke_test.py"
 
 permissions:
   contents: read
@@ -51,7 +48,6 @@ jobs:
           echo "  Branch : ${{ github.ref_name }}"
           echo "  Actor  : ${{ github.actor }}"
           echo "=================================================="
-          echo "Put your script under scripts/python_jobs/<team>/… then set script_path."
 
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
@@ -62,7 +58,7 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install "snowflake-connector-python>=3.12.0" cryptography
+          pip install "snowflake-connector-python>=3.12.0" cryptography pandas
 
       - name: Write Snowflake private key
         run: |
@@ -85,10 +81,21 @@ jobs:
           SCRIPT="${{ inputs.script_path }}"
           if [ ! -f "$SCRIPT" ]; then
             echo "::error::Script not found on this branch: $SCRIPT"
-            echo "Commit the file first, then Run workflow from a branch that contains it."
             exit 1
           fi
+          mkdir -p output
           python "$SCRIPT"
+
+      - name: Upload CSV + HTML proof artifacts
+        if: always()
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
+        with:
+          name: "python_poc_${{ inputs.target_env }}_${{ github.run_id }}"
+          path: |
+            output/*.csv
+            output/*.html
+          if-no-files-found: warn
+          retention-days: 30
 
       - name: Cleanup private key
         if: always()

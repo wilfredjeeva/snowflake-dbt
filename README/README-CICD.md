@@ -176,15 +176,22 @@ DEV is a **shared** warehouse/database. Two developers running at once can colli
 
 ### POC — custom Python → Snowflake (Environment secrets)
 
-Use **`poc-python-snowflake`** to prove non-dbt Python jobs can use the same GitHub Environment secrets as dbt CI (key-pair / JWT).
+Use **`poc-python-snowflake`** for on-demand Python jobs with the same Environment secrets as dbt CI (key-pair / JWT). Cron comes later — today is **Run workflow** only.
 
 | Input | Purpose |
 |---|---|
-| `run_title` | Actions run name |
+| `run_title` | Actions run name (job / ticket) |
 | `target_env` | `DEV` / `test` / `preprod` / `prod` (must match Environment name exactly) |
-| `script_path` | Repo path to run (default `scripts/poc_snowflake_connect.py`) |
+| `script_path` | Repo path to the script to run |
 
-The workflow writes `SNOWFLAKE_PRIVATE_KEY` to a temp PEM file and passes the same secret names your screenshot shows. Swap `script_path` for the team’s real automation script later; add `schedule:` when they are ready for cron.
+**Proof run:** leave `script_path` as `scripts/poc_snowflake_connect.py` — it runs a 5-row generator `SELECT` and prints the result table in the log.
+
+**How teammates run their own scripts**
+
+1. Commit script under `scripts/python_jobs/<team_or_name>/my_job.py` (use `sf_connect.connect()` — see `scripts/python_jobs/README.md`).
+2. Actions → **poc-python-snowflake** → **Run workflow**.
+3. Set **script_path** to that file (must already exist on the branch you dispatch from).
+4. Download nothing required — stdout in **Run Python script** is the evidence.
 
 ### Manual selective tests only (QA evidence)
 

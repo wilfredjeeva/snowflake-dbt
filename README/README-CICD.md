@@ -40,6 +40,7 @@ feature/*  ──PR──►  test  ──[promote] PR──►  main
 | `manual-selective-deploy-to-preprod.yml` | Targeted `dbt build --select` → PREPROD | `workflow_dispatch` only |
 | `manual-selective-deploy-to-prod.yml` | Targeted `dbt build --select` → PROD (**always checks out `main`**) | `workflow_dispatch` from `main` only |
 | `manual-selective-test.yml` | Targeted **`dbt test` only** (no model rebuild, no `snow dbt deploy`) → TEST / PREPROD / PROD | `workflow_dispatch` only |
+| `poc-python-snowflake.yml` | **POC** — run a custom Python script with Snowflake env secrets (key-pair) | `workflow_dispatch` only |
 | `manual-full-build-deploy-to-test.yml` | Full build of `test` → TEST | `workflow_dispatch` only |
 | `manual-full-build-deploy-to-preprod.yml` | Full build of `test` → PREPROD | `workflow_dispatch` only |
 | `manual-full-build-deploy-to-prod.yml` | Full build of `main` → PROD | `workflow_dispatch` only |
@@ -172,6 +173,18 @@ Use **`manual-selective-deploy-to-dev`** when a developer would otherwise run mo
 This job **does not** run `snow dbt deploy` (that would overwrite a shared DEV dbt project object from unfinished feature branches). It only `dbt build`s into Snowflake DEV.
 
 DEV is a **shared** warehouse/database. Two developers running at once can collide. This is not a replacement for merging to `test`.
+
+### POC — custom Python → Snowflake (Environment secrets)
+
+Use **`poc-python-snowflake`** to prove non-dbt Python jobs can use the same GitHub Environment secrets as dbt CI (key-pair / JWT).
+
+| Input | Purpose |
+|---|---|
+| `run_title` | Actions run name |
+| `target_env` | `DEV` / `test` / `preprod` / `prod` (must match Environment name exactly) |
+| `script_path` | Repo path to run (default `scripts/poc_snowflake_connect.py`) |
+
+The workflow writes `SNOWFLAKE_PRIVATE_KEY` to a temp PEM file and passes the same secret names your screenshot shows. Swap `script_path` for the team’s real automation script later; add `schedule:` when they are ready for cron.
 
 ### Manual selective tests only (QA evidence)
 
